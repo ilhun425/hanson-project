@@ -1,0 +1,6 @@
+dev/
+ref/
+.claude/
+.clasp.json
+.clasprc.json
+node_modules/

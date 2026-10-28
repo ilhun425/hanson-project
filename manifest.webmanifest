@@ -1,0 +1,16 @@
+{
+  "name": "프로젝트 관리",
+  "short_name": "프로젝트 관리",
+  "description": "프로젝트 개요와 하드웨어 발주·납품 내역을 함께 기록하고 봅니다.",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f9fb",
+  "theme_color": "#1f7fbf",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
