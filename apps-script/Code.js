@@ -18,12 +18,24 @@ const SHEETS = {
     ['createdAt', '등록일시'], ['updatedAt', '수정일시']] },
   hw: { name: '하드웨어', cols: [
     ['id', 'id'], ['projectId', '프로젝트id'], ['seq', '순번'], ['name', '제품명'], ['model', '모델명'], ['unit', '단위'],
-    ['qty', '수량', 'num'], ['amount', '금액', 'num'], ['createdAt', '등록일시']] },
+    ['qty', '수량', 'num'], ['amount', '금액', 'num'], ['createdAt', '등록일시'],
+    ['maker', '매입처'], ['erpCode', 'ERP품목코드'], ['erpState', '품목코드상태']] },
   order: { name: '발주', cols: [
     ['id', 'id'], ['projectId', '프로젝트id'], ['hwId', '하드웨어id'], ['date', '날짜'], ['qty', '수량', 'num'], ['createdAt', '등록일시']] },
   delivery: { name: '납품', cols: [
     ['id', 'id'], ['projectId', '프로젝트id'], ['hwId', '하드웨어id'], ['date', '날짜'], ['qty', '수량', 'num'], ['createdAt', '등록일시']] },
+  // 품목 별칭 사전: 견적 모델명(별칭) → ERP 품목코드. 프로젝트 관리와 재고 확인이 함께 씀
+  alias: { name: '별칭 사전', cols: [
+    ['code', '품목코드'], ['erpName', 'ERP 품목명'], ['erpSpec', 'ERP 규격'], ['supplier', '매입처'], ['alias', '별칭 (견적 모델명)'],
+    ['quoteName', '견적 품명'], ['rel', '관계'], ['status', '확인 상태'], ['reason', '근거'], ['source', '출처 (견적 시트 / POS)'],
+    ['count', '등장 횟수', 'num'], ['others', '같은 규격의 다른 품목코드'], ['addedAt', '등록일시'], ['addedBy', '등록한 곳']] },
+  // 이카운트 전체 품목 (매칭할 때 찾아볼 목록)
+  item: { name: '전체 품목', cols: [
+    ['code', '품목코드'], ['name', '품목명'], ['spec', '규격'], ['unit', '단위'], ['supplier', '매입처'], ['search', '검색창내용']] },
 };
+const SURE = '확실', UNSURE = '확인 필요';
+// 기호 무시 비교 (두 화면과 같은 규칙). 헤펠레 8자리 코드도 숫자는 그대로 남으므로 숫자가 하나라도 다르면 다른 별칭
+const normModel = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toUpperCase().replace(/[\s\-_.·'"`’()\[\]]/g, '');
 
 /* ---------------- 입구 ---------------- */
 
@@ -44,9 +56,18 @@ function doPost(e) {
 }
 
 function handle(req) {
-  if (req.action === 'login') return login(req.password);
-  checkToken(req.token);
+  if (req.action === 'login') return login(req.password, req.scope, req.auto);
+  const scope = checkToken(req.token);
+  if (/^(dict|addAlias|catalog|setErp)$/.test(req.action)) ensureSeed();
+  // 사전 전용 토큰(재고 확인)은 사전 읽기·추가만 할 수 있음
   switch (req.action) {
+    case 'dict': return { aliases: aliasList() };
+    case 'addAlias': return withLock(() => ({ added: addAliases(req.pairs, '재고 확인'), aliases: aliasList() }));
+  }
+  if (scope !== 'full') fail('forbidden', '이 비밀번호로는 할 수 없는 일입니다.');
+  switch (req.action) {
+    case 'catalog': return { aliases: aliasList(), items: catalogItems() };
+    case 'setErp': return withLock(() => setErp(req.changes, req.addAlias));
     case 'list': return listProjects();
     case 'project': return getProject(req.id);
     case 'saveProject': return withLock(() => saveProject(req.project || {}));
@@ -90,13 +111,20 @@ function safeEq(a, b) {
   return d === 0;
 }
 
-function login(pw) {
+// scope 'dict' = 재고 확인 화면. 공동 비밀번호 또는 [재고 확인 암호 등록]으로 넣은 암호로 사전만 열 수 있음
+// auto = 재고 확인이 재고 암호로 자동 연결해 보는 것. 재고 확인 암호가 아직 없으면 비교하지 않고(실패로 세지 않고) 바로 알림
+function login(pw, scope, auto) {
   const p = props(), cache = CacheService.getScriptCache();
+  const dict = scope === 'dict';
+  const dHash = p.getProperty('DICT_PASS_HASH'), dSalt = p.getProperty('DICT_PASS_SALT');
+  if (dict && auto && !dHash) fail('no_dict_password', '재고 확인 암호가 아직 사전에 등록되지 않았습니다.');
   const until = Number(cache.get('lockUntil') || 0);
   if (until > Date.now()) fail('locked', `비밀번호를 여러 번 틀려 잠시 잠겼습니다. ${Math.ceil((until - Date.now()) / 60000)}분 뒤 다시 시도해 주세요.`);
   const hash = p.getProperty('PASS_HASH'), salt = p.getProperty('PASS_SALT');
   if (!hash || !salt) fail('no_password', '아직 공동 비밀번호가 정해지지 않았습니다. 관리자에게 알려 주세요.');
-  if (typeof pw !== 'string' || !pw || pw.length > 200 || !safeEq(hashPass(pw, salt), hash)) {
+  const okPw = typeof pw === 'string' && pw && pw.length <= 200;
+  const good = okPw && (safeEq(hashPass(pw, salt), hash) || (dict && dHash && dSalt && safeEq(hashPass(pw, dSalt), dHash)));
+  if (!good) {
     const lock = LockService.getScriptLock(); lock.waitLock(10000);
     let locked = false;
     try {
@@ -109,21 +137,28 @@ function login(pw) {
     fail('bad_password', '비밀번호가 맞지 않습니다.');
   }
   cache.remove('fails');
+  if (dict) { ensureSeed(); return { token: makeToken('dict'), aliases: aliasList() }; }
   return { token: makeToken(), statuses: statuses() };
 }
 
-// 토큰 = 만료시각.서명. 비밀번호를 바꾸면 서명 키가 바뀌어 모든 기기가 다시 로그인해야 함
-function signingKey() {
+// 토큰 = 만료시각.서명 (전체) 또는 만료시각.dict.서명 (사전만). 비밀번호를 바꾸면 서명 키가 바뀌어 모든 기기가 다시 로그인해야 함
+// (재고 확인 암호를 바꾸면 사전 전용 토큰만 무효)
+function signingKey(dict) {
   const p = props();
   let s = p.getProperty('TOKEN_SECRET');
   if (!s) { s = Utilities.getUuid() + Utilities.getUuid(); p.setProperty('TOKEN_SECRET', s); }
-  return s + '|' + (p.getProperty('PASS_HASH') || '');
+  return s + '|' + (p.getProperty('PASS_HASH') || '') + (dict ? '|' + (p.getProperty('DICT_PASS_HASH') || '') : '');
 }
-const sign = (s) => Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(s, signingKey()));
-function makeToken() { const exp = String(Date.now() + TOKEN_DAYS * 864e5); return exp + '.' + sign(exp); }
+const sign = (s) => Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(s, signingKey(/\.dict$/.test(s))));
+function makeToken(scope) {
+  const exp = String(Date.now() + (scope === 'dict' ? 1 : TOKEN_DAYS) * 864e5);
+  const body = scope === 'dict' ? exp + '.dict' : exp;
+  return body + '.' + sign(body);
+}
 function checkToken(t) {
-  const m = /^(\d{10,16})\.([\w\-=]+)$/.exec(String(t || ''));
-  if (!m || Number(m[1]) < Date.now() || !props().getProperty('PASS_HASH') || !safeEq(sign(m[1]), m[2])) fail('auth', '다시 로그인해 주세요.');
+  const m = /^(\d{10,16})(\.dict)?\.([\w\-=]+)$/.exec(String(t || ''));
+  if (!m || Number(m[1]) < Date.now() || !props().getProperty('PASS_HASH') || !safeEq(sign(m[1] + (m[2] || '')), m[3])) fail('auth', '다시 로그인해 주세요.');
+  return m[2] ? 'dict' : 'full';
 }
 
 /* ---------------- 시트 읽기·쓰기 ---------------- */
@@ -136,14 +171,21 @@ function book() {
   return SpreadsheetApp.openById(id);
 }
 
+const checkedHeads = {};
 function sheet(key) {
   const def = SHEETS[key], ss = book();
   let sh = ss.getSheetByName(def.name);
+  const heads = def.cols.map((c) => c[1]);
   if (!sh) {
     sh = ss.insertSheet(def.name);
-    sh.getRange(1, 1, 1, def.cols.length).setValues([def.cols.map((c) => c[1])]).setFontWeight('bold');
+    sh.getRange(1, 1, 1, heads.length).setValues([heads]).setFontWeight('bold');
     sh.setFrozenRows(1);
+  } else if (!checkedHeads[key]) {
+    // 새 버전에서 열이 늘었으면 머리글을 채움 (기존 열 순서는 그대로, 새 열은 오른쪽에 더함)
+    const cur = sh.getRange(1, 1, 1, heads.length).getValues()[0];
+    if (cur.some((v, i) => String(v) !== heads[i])) sh.getRange(1, 1, 1, heads.length).setValues([heads]).setFontWeight('bold');
   }
+  checkedHeads[key] = true;
   return sh;
 }
 
@@ -268,7 +310,8 @@ function uploadHardware(projectId, items, mode) {
   const rows = items.map((it) => {
     const qty = Number(it.qty);
     if (!isFinite(qty) || qty < 0) fail('invalid', `수량이 숫자가 아닌 품목이 있습니다: ${clip(it.name || it.model, 40)}`);
-    return { id: newId(), projectId, seq: clip(it.seq, 20), name: clip(it.name), model: clip(it.model), unit: clip(it.unit, 20), qty, amount: Number(it.amount) || 0, createdAt: t };
+    return { id: newId(), projectId, seq: clip(it.seq, 20), name: clip(it.name), model: clip(it.model), unit: clip(it.unit, 20), qty, amount: Number(it.amount) || 0, createdAt: t,
+      maker: clip(it.maker, 60), erpCode: clip(it.erpCode, 40), erpState: ERP_STATES.includes(it.erpState) && it.erpCode ? it.erpState : '' };
   });
   if (mode === 'replace') ['order', 'delivery', 'hw'].forEach((k) => deleteWhere(k, (r) => r.projectId === projectId));
   appendRows('hw', rows);
@@ -295,12 +338,121 @@ function deleteRecord(kind, id) {
   return getProject(rec.projectId);
 }
 
+/* ---------------- 품목 별칭 사전 ---------------- */
+
+// 품목코드 상태: dict = 사전('확실')으로 붙임, guess = 기호 무시 비교로 추정, ok = 사람이 확인, none = 사람이 'ERP에 없음'으로 확인
+const ERP_STATES = ['dict', 'guess', 'ok', 'none'];
+
+function aliasList() {
+  return readAll('alias').map((a) => ({ code: a.code, alias: a.alias, status: a.status === SURE ? SURE : UNSURE,
+    erpName: a.erpName, erpSpec: a.erpSpec, supplier: a.supplier, quoteName: a.quoteName, rel: a.rel }));
+}
+function catalogItems() {
+  return readAll('item').map((i) => [i.code, i.name, i.spec, i.unit, i.supplier, i.search]);
+}
+
+// 사람이 확인한 짝을 사전에 더함. 같은 품목코드·같은 별칭(기호 무시)이 있으면 '확실'로 올리고, 이미 확실이면 등장 횟수만 늘림
+function addAliases(pairs, by) {
+  if (!Array.isArray(pairs) || !pairs.length) fail('invalid', '사전에 넣을 짝이 없습니다.');
+  if (pairs.length > 500) fail('invalid', '한 번에 500개까지 넣을 수 있습니다.');
+  const def = SHEETS.alias, sh = sheet('alias'), n = Math.max(0, sh.getLastRow() - 1);
+  const raw = n ? sh.getRange(2, 1, n, def.cols.length).getValues() : [];
+  const ci = (k) => def.cols.findIndex((c) => c[0] === k);
+  const C = { code: ci('code'), alias: ci('alias'), status: ci('status'), reason: ci('reason'), count: ci('count'), rel: ci('rel'), addedAt: ci('addedAt'), addedBy: ci('addedBy') };
+  const items = new Map(readAll('item').map((i) => [i.code, i]));
+  const t = now(), add = [], touched = new Set();
+  let added = 0, raised = 0;
+  pairs.forEach((p) => {
+    const code = clip(p && p.code, 40), alias = clip(p && p.alias), key = normModel(alias);
+    if (!code || !key) return;
+    const i = raw.findIndex((r) => String(r[C.code]) === code && normModel(r[C.alias]) === key);
+    if (i >= 0) {
+      const r = raw[i];
+      if (r[C.status] !== SURE) { r[C.status] = SURE; r[C.rel] = '같은 제품 (사람이 확인)'; r[C.reason] = by + '에서 사람이 확인'; r[C.addedAt] = t; r[C.addedBy] = by; raised++; }
+      else r[C.count] = (Number(r[C.count]) || 0) + 1;
+      touched.add(i);
+      return;
+    }
+    if (add.some((a) => a.code === code && normModel(a.alias) === key)) return;
+    const it = items.get(code) || {};
+    add.push({ code, erpName: it.name || clip(p.erpName), erpSpec: it.spec || clip(p.erpSpec), supplier: it.supplier || clip(p.supplier, 60), alias,
+      quoteName: clip(p.quoteName), rel: '같은 제품 (사람이 확인)', status: SURE, reason: by + '에서 사람이 확인', source: clip(p.source),
+      count: 1, others: '', addedAt: t, addedBy: by });
+    added++;
+  });
+  const asObj = (r) => { const o = {}; def.cols.forEach(([k], j) => { o[k] = r[j] instanceof Date ? Utilities.formatDate(r[j], tz(), 'yyyy-MM-dd HH:mm:ss') : r[j]; }); return o; };
+  touched.forEach((i) => writeRows('alias', i + 2, [asObj(raw[i])]));
+  if (add.length) appendRows('alias', add);
+  return { added, raised };
+}
+
+// 하드웨어 품목에 ERP 품목코드를 붙이거나 바꿈. addAlias면 사람이 확인한(ok) 짝을 사전에도 더함
+function setErp(changes, addAlias) {
+  if (!Array.isArray(changes) || !changes.length) fail('invalid', '바꿀 품목이 없습니다.');
+  if (changes.length > 3000) fail('invalid', '품목이 너무 많습니다.');
+  const def = SHEETS.hw, sh = sheet('hw'), n = sh.getLastRow() - 1;
+  if (n < 1) fail('not_found', '품목을 찾지 못했습니다.');
+  const all = sh.getRange(2, 1, n, def.cols.length).getValues();
+  const ci = (k) => def.cols.findIndex((c) => c[0] === k);
+  const I = { id: ci('id'), pid: ci('projectId'), name: ci('name'), model: ci('model'), code: ci('erpCode'), st: ci('erpState') };
+  const at = new Map(all.map((r, i) => [String(r[I.id]), i]));
+  const pairs = [];
+  let projectId = '';
+  changes.forEach((c) => {
+    const i = at.get(String(c && c.hwId));
+    if (i == null) fail('not_found', '품목을 찾지 못했습니다. 다른 사람이 품목을 바꿨을 수 있습니다.');
+    const code = clip(c.erpCode, 40), st = ERP_STATES.includes(c.erpState) ? c.erpState : '';
+    if (st && st !== 'none' && !code) fail('invalid', '품목코드가 비어 있습니다.');
+    all[i][I.code] = st === 'none' || !st ? '' : code; all[i][I.st] = st;
+    projectId = projectId || String(all[i][I.pid]);
+    if (addAlias && st === 'ok' && String(all[i][I.model]).trim()) pairs.push({ code, alias: all[i][I.model], quoteName: all[i][I.name] });
+  });
+  const rg = sh.getRange(2, I.code + 1, n, 2);
+  rg.setNumberFormats(all.map(() => ['@', '@']));
+  rg.setValues(all.map((r) => [String(r[I.code] == null ? '' : r[I.code]), String(r[I.st] == null ? '' : r[I.st])]));
+  let dict = null;
+  if (pairs.length) {
+    const site = (readAll('project').find((p) => p.id === projectId) || {}).site || '';
+    pairs.forEach((p) => { p.source = '프로젝트 관리 / ' + site; });
+    dict = addAliases(pairs, '프로젝트 관리');
+  }
+  return Object.assign(getProject(projectId), { dict, aliases: aliasList() });
+}
+
+// 처음 사전 자료(Seed.js — 회사 자료라 공개 저장소에는 없고 Apps Script에만 올림)를 시트로 옮김
+function ensureSeed() {
+  if (typeof SEED_ALIAS === 'undefined') return;
+  const ss = book(), a = ss.getSheetByName(SHEETS.alias.name), i = ss.getSheetByName(SHEETS.item.name);
+  if (a && i && a.getLastRow() > 1 && i.getLastRow() > 1) return;
+  withLock(() => importSeed(false));
+}
+// 별칭 사전은 비어 있을 때만 채움 (사람이 더한 줄을 지우지 않도록). 전체 품목은 replaceItems면 새 목록으로 바꿈
+function importSeed(replaceItems) {
+  if (typeof SEED_ALIAS === 'undefined') { sheet('alias'); sheet('item'); return '가져올 자료(Seed.js)가 없습니다.'; }
+  const toObj = (cols, r) => { const o = {}; cols.forEach(([k], i) => { o[k] = r[i]; }); return o; };
+  const msg = [];
+  if (sheet('alias').getLastRow() < 2) {
+    appendRows('alias', SEED_ALIAS.map((r) => toObj(SHEETS.alias.cols, r)));
+    msg.push('별칭 사전 ' + SEED_ALIAS.length + '줄');
+  }
+  const ish = sheet('item');
+  if (replaceItems || ish.getLastRow() < 2) {
+    if (ish.getLastRow() > 1) ish.getRange(2, 1, ish.getLastRow() - 1, SHEETS.item.cols.length).clearContent();
+    writeRows('item', 2, SEED_ITEMS.map((r) => toObj(SHEETS.item.cols, r)));
+    msg.push('전체 품목 ' + SEED_ITEMS.length + '개 (' + SEED_NAME + ')');
+  }
+  return msg.length ? msg.join(', ') + '를 가져왔습니다.' : '이미 들어 있어 바꾸지 않았습니다.';
+}
+
 /* ---------------- 관리자 메뉴 (스프레드시트에서) ---------------- */
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('핸썬 관리')
     .addItem('공동 비밀번호 정하기', 'setPasswordPrompt')
     .addItem('시트 준비', 'setup')
+    .addSeparator()
+    .addItem('재고 확인 암호 등록 (사전 연결용)', 'setDictPasswordPrompt')
+    .addItem('별칭 사전·전체 품목 가져오기', 'importSeedMenu')
     .addToUi();
 }
 
@@ -325,4 +477,21 @@ function setPasswordPrompt() {
   props().setProperties({ PASS_SALT: salt, PASS_HASH: hashPass(pw, salt) });
   CacheService.getScriptCache().removeAll(['fails', 'lockUntil']);
   ui.alert('공동 비밀번호를 저장했습니다. 동료들에게 알려 주세요.');
+}
+
+// 재고 확인 화면의 '앱 암호'를 등록해 두면, 재고 확인이 그 암호로 별칭 사전에 자동 연결됨 (사전 읽기·추가만 가능)
+function setDictPasswordPrompt() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('재고 확인 암호 등록', '재고 확인 화면에서 쓰는 앱 암호를 입력해 주세요. 이 암호로는 별칭 사전만 읽고 더할 수 있습니다. 비워 두고 확인을 누르면 등록을 지웁니다.', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  const pw = r.getResponseText();
+  if (!pw) { props().deleteProperty('DICT_PASS_HASH'); props().deleteProperty('DICT_PASS_SALT'); ui.alert('재고 확인 암호 등록을 지웠습니다.'); return; }
+  const salt = Utilities.getUuid();
+  props().setProperties({ DICT_PASS_SALT: salt, DICT_PASS_HASH: hashPass(pw, salt) });
+  CacheService.getScriptCache().removeAll(['fails', 'lockUntil']);
+  ui.alert('재고 확인 암호를 등록했습니다.');
+}
+
+function importSeedMenu() {
+  SpreadsheetApp.getUi().alert(withLock(() => importSeed(true)));
 }

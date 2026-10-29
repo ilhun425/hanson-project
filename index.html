@@ -216,6 +216,29 @@ dialog::backdrop { background: rgba(10, 20, 30, .45); }
 .mode input { margin-top: 4px; }
 .file-in { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
+/* ERP 품목코드 */
+.erp { margin-top: 4px; font-size: 14px; color: var(--ink-2); overflow-wrap: anywhere; }
+.erp .code, .clist .code { font-family: var(--f-mono); font-size: 14px; font-weight: 500; color: var(--ink); }
+.erp .pill { font-size: 13px; padding: 1px 8px; }
+.erp-acts { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-left: 8px; vertical-align: middle; }
+.btn.sm { padding: 2px 8px; font-size: 14px; }
+.e-dict { --c: var(--ok); --cb: var(--ok-bg); } .e-ok { --c: var(--sky-ink); --cb: var(--sky-soft); }
+.e-guess { --c: var(--part); --cb: var(--part-bg); } .e-none { --c: var(--ink-2); --cb: var(--mute-bg); }
+.dlg h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.quote { padding: 10px 12px; border-radius: var(--r); background: var(--mute-bg); font-size: 15px; }
+.clist { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
+.clist:empty { display: none; }
+.copt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; padding: 6px 8px; border-radius: 6px; font-size: 15px; cursor: pointer; }
+@media (hover: hover) { .copt:hover { background: var(--mute-bg); } }
+.copt input { margin: 4px 0 0; }
+.copt .t { min-width: 0; overflow-wrap: anywhere; }
+.copt .why { color: var(--chk); }
+.clist .note, .clist .none { margin: 4px 8px; font-size: 14px; color: var(--ink-2); }
+.dlg input[type=search] { font: inherit; font-size: 15px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); width: 100%; min-width: 0; }
+.tick { display: flex; gap: 8px; align-items: flex-start; font-size: 15px; }
+.tick input { margin-top: 4px; }
+.tick input:disabled + span { color: var(--ink-2); }
+
 .foot { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--paper); padding: 8px 14px; border-radius: 8px; font-size: 15px; max-width: calc(100vw - 32px); }
 .busy { font-size: 15px; color: var(--sky-ink); }
@@ -227,7 +250,7 @@ dialog::backdrop { background: rgba(10, 20, 30, .45); }
 <div class="wrap">
   <main id="app" aria-live="polite"></main>
   <footer class="foot">
-    <p class="note muted">주식회사 핸썬 Hanson Inc. · Version 02</p>
+    <p class="note muted">주식회사 핸썬 Hanson Inc. · Version 03</p>
     <button class="btn link" type="button" id="logout" hidden>이 기기에서 잠그기</button>
   </footer>
 </div>

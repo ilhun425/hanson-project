@@ -205,7 +205,9 @@
     if (state.detail && state.detail.project.id === id) renderDetail();
     else app.replaceChildren(back, el('p', 'busy', '불러오는 중…'));
     try { state.detail = await api('project', { id }); if (location.hash === '#/p/' + id) renderDetail(); }
-    catch (e) { if (e.code !== 'auth' && location.hash === '#/p/' + id) app.replaceChildren(back, el('p', 'err', e.message)); }
+    catch (e) { if (e.code !== 'auth' && location.hash === '#/p/' + id) app.replaceChildren(back, el('p', 'err', e.message)); return; }
+    // ERP 품목명을 보여 주려고 품목 목록을 한 번 불러 둠 (실패해도 화면은 그대로)
+    if (!state.cat && state.detail.items.length) ensureCatalog().then(() => { if (location.hash === '#/p/' + id) renderDetail(); }).catch(() => {});
   }
 
   function renderDetail() {
@@ -235,6 +237,20 @@
     const hwHead = el('div', 'top');
     const ht = el('div'); ht.append(el('h2', null, `하드웨어 품목 ${c.items.length ? fmt(c.items.length) + '개' : ''}`));
     const up = el('div', 'tools');
+    const todo = d.items.filter((it) => it.erpState === 'guess' || !it.erpState);
+    if (todo.length) {
+      ht.append(el('p', 'lede', `품목코드 확인이 필요한 품목 ${fmt(todo.length)}개 (추정 ${fmt(todo.filter((it) => it.erpState === 'guess').length)} · 없음 ${fmt(todo.filter((it) => !it.erpState).length)})`));
+      // 사전이 늘었을 수 있으니, 품목코드가 없는 품목만 다시 찾아 붙임 (사람이 확인한 것은 건드리지 않음)
+      const again = btn('품목코드 다시 찾기', null, () => run(again, async () => {
+        await ensureCatalog();
+        const changes = d.items.filter((it) => !it.erpState).map((it) => ({ it, m: matchErp(it) })).filter((x) => x.m.code)
+          .map((x) => ({ hwId: x.it.id, erpCode: x.m.code, erpState: x.m.state }));
+        if (!changes.length) { toast('새로 찾은 품목코드가 없습니다.'); return; }
+        state.detail = await api('setErp', { changes }); setAliases(state.detail.aliases); renderDetail();
+        toast(`품목 ${fmt(changes.length)}개에 품목코드를 붙였습니다.`);
+      }));
+      if (todo.some((it) => !it.erpState)) up.append(again);
+    }
     const fileIn = el('input', 'file-in'); fileIn.type = 'file'; fileIn.id = 'hw-file'; fileIn.accept = '.xlsx,.xlsm,.xls,.csv';
     const upBtn = el('label', 'btn primary', '엑셀로 품목 올리기'); upBtn.htmlFor = 'hw-file';
     fileIn.onchange = () => { const f = fileIn.files[0]; fileIn.value = ''; if (f) openUpload(f); };
@@ -263,6 +279,7 @@
     const seq = el('div', 'c-seq seq', it.seq || '–');
     const name = el('div', 'c-name'); name.append(el('div', 'nm', (it.seq ? '' : '') + (it.name || '(제품명 없음)')));
     if (it.model) name.append(el('div', 'model', it.model));
+    name.append(erpLine(it));
     const unit = el('div', 'c-unit', it.unit || '–');
     const qty = el('div', 'c-qty num'); qty.append(el('span', 'lbl', '수량'), document.createTextNode(fmt(it.qty)));
     if (it.unit) { const u = el('span', 'lbl', ' ' + it.unit); u.style.marginLeft = '4px'; qty.append(u); }
@@ -288,6 +305,92 @@
       wrap.append(recs);
     }
     return wrap;
+  }
+
+  // 품목 아래 ERP 품목코드 한 줄: 코드 · ERP 품목명 · 상태, 그리고 확인 버튼
+  function erpLine(it) {
+    const e = el('div', 'erp');
+    if (it.erpState === 'none') e.append(el('span', 'pill e-none', ERP_LABEL.none));
+    else if (it.erpCode) {
+      e.append(el('span', 'code', it.erpCode));
+      const t = erpText(it.erpCode); if (t) e.append(document.createTextNode(' ' + t));
+      e.append(document.createTextNode(' '), el('span', 'pill e-' + (it.erpState || 'guess'), ERP_LABEL[it.erpState] || '추정'));
+    } else e.append(el('span', 'muted', '품목코드 없음'));
+    const acts = el('span', 'erp-acts');
+    if (it.erpState === 'guess') {
+      const yes = btn('맞음', 'sm', () => saveErp(yes, it, it.erpCode, true));
+      yes.title = '이 품목코드가 맞으면 누르세요. 별칭 사전에도 더합니다.';
+      acts.append(yes);
+    }
+    acts.append(btn(it.erpCode || it.erpState === 'none' ? '바꾸기' : '품목코드 찾기', 'sm', () => openErp(it)));
+    e.append(acts);
+    return e;
+  }
+
+  async function saveErp(button, it, code, toDict) {
+    const ok = await run(button, async () => {
+      const j = await api('setErp', { changes: [{ hwId: it.id, erpCode: code, erpState: code ? 'ok' : 'none' }], addAlias: !!(toDict && code) });
+      state.detail = j; setAliases(j.aliases);
+      return j;
+    });
+    if (!ok) return false;
+    if ($('dlg').open) $('dlg').close();
+    renderDetail();
+    toast(code ? '품목코드를 저장했습니다.' + (ok.dict ? (ok.dict.added || ok.dict.raised ? ' 별칭 사전에도 더했습니다.' : ' 사전에 이미 있는 짝입니다.') : '') : 'ERP에 없는 품목으로 표시했습니다.');
+    return true;
+  }
+
+  // 품목코드 고르기: 후보(사전 → 기호 무시 → 품명·매입처) + 전체 품목에서 찾기 + ERP에 없음
+  async function openErp(it) {
+    const dlg = $('dlg');
+    const box = el('form', 'dlg'); box.method = 'dialog';
+    box.append(el('h2', null, '품목코드 확인'), el('p', 'busy', '품목 목록을 불러오는 중…'));
+    dlg.replaceChildren(box); if (!dlg.open) dlg.showModal();
+    try { await ensureCatalog(); } catch (e) {
+      box.replaceChildren(el('h2', null, '품목코드 확인'), el('p', 'err', e.message));
+      const a = el('div', 'actions'); a.append(btn('닫기', null, () => dlg.close())); box.append(a); return;
+    }
+    const m = matchErp(it);
+    let pick = it.erpState === 'none' ? '' : (it.erpCode || m.code || null);
+    const q0 = el('div', 'quote');
+    q0.append(el('div', 'nm', it.name || '(제품명 없음)'));
+    if (it.model) q0.append(el('div', 'model', it.model));
+    if (it.maker) q0.append(el('div', 'muted', '매입처 ' + it.maker));
+    const list = el('div', 'clist'); list.setAttribute('role', 'radiogroup'); list.setAttribute('aria-label', '품목코드 후보');
+    const found = el('div', 'clist');
+    const chk = el('input'); chk.type = 'checkbox'; chk.checked = !!it.model;
+    const chkL = el('label', 'tick'); chkL.append(chk, el('span', null, '이 모델명과 품목코드를 별칭 사전에 더하기 (다음부터 자동으로 붙습니다)'));
+    const opt = (code, why, group) => {
+      const lb = el('label', 'copt');
+      const r = el('input'); r.type = 'radio'; r.name = 'erp'; r.value = code; r.checked = pick === code;
+      r.onchange = () => { pick = code; chk.disabled = !code || !it.model; };
+      const t = el('span', 't');
+      if (code) { const ci = state.cat.byCode.get(code); t.append(el('span', 'code', code + ' '), document.createTextNode(ci ? ci.full : '(전체 품목에 없음)')); if (ci && ci.supplier) t.append(el('span', 'muted', ' · ' + ci.supplier)); }
+      else t.append(document.createTextNode('ERP에 없는 품목 (품목코드 비움)'));
+      if (why) t.append(el('span', 'why', ' · ' + why));
+      lb.append(r, t); group.append(lb);
+    };
+    const cands = m.cands.slice();
+    if (it.erpCode && !cands.some((c) => c.code === it.erpCode)) cands.unshift({ code: it.erpCode, why: '지금 붙어 있는 코드' });
+    if (cands.length) cands.forEach((c) => opt(c.code, c.why, list));
+    else list.append(el('p', 'none', '자동으로 찾은 후보가 없습니다. 아래에서 찾아 주세요.'));
+    opt('', '', list);
+    const q = el('input'); q.type = 'search'; q.placeholder = '품목코드·품목명·규격·매입처로 찾기'; q.setAttribute('aria-label', '전체 품목에서 찾기');
+    const search = () => {
+      const k = normM(q.value); found.replaceChildren();
+      if (k.length < 2) return;
+      const hits = state.cat.items.filter((x) => normM(x.code + ' ' + x.full + ' ' + x.supplier).includes(k));
+      hits.slice(0, 30).forEach((x) => opt(x.code, '', found));
+      found.append(el('p', 'note', hits.length ? (hits.length > 30 ? `${fmt(hits.length)}개 중 30개만 보입니다. 더 자세히 적어 주세요.` : `${fmt(hits.length)}개`) : '맞는 품목이 없습니다.'));
+    };
+    q.oninput = search;
+    q.onkeydown = (e) => { if (e.key === 'Enter') e.preventDefault(); };
+    chk.disabled = !pick || !it.model;
+    const acts = el('div', 'actions');
+    const ok = el('button', 'btn primary', '확인'); ok.type = 'button';
+    ok.onclick = () => { if (pick == null) { toast('품목코드를 골라 주세요.'); return; } saveErp(ok, it, pick, chk.checked); };
+    acts.append(ok, btn('취소', null, () => dlg.close()));
+    box.replaceChildren(el('h2', null, '품목코드 확인'), q0, el('h3', null, '후보'), list, el('h3', null, '전체 품목에서 찾기'), q, found, chkL, acts);
   }
 
   function recPanel(x, kind, word, list) {
@@ -428,6 +531,7 @@
     ['unit', '단위', /^(UNIT|단위)$/],
     ['qty', '수량', /^(Q'?TY|QUANTITY|수량|TOTALQ'?TY)$/],
     ['amount', '금액', /^(AMOUNT|금액|합계금액|공급가액|TOTALAMOUNT)$/],
+    ['maker', '매입처', /^(매입처|구매처|브랜드|제조사|BRAND|MAKER|MANUFACTURER|SUPPLIER)$/, true], // 있으면 매칭에 씀
   ];
   const SKIP = /^(TOTAL|SUBTOTAL|SUB-TOTAL|합계|소계|총계|계)$/i;
 
@@ -450,7 +554,7 @@
           if (SKIP.test(seq.replace(/\s/g, '')) || SKIP.test(name.replace(/\s/g, '')) || SKIP.test(model.replace(/\s/g, ''))) continue;
           const qty = toNum(g('qty'));
           if (qty == null) continue; // 구분 제목 행 (예: "1. DOOR HARDWARE")
-          items.push({ seq, name, model, unit: txt(g('unit')), qty, amount: toNum(g('amount')) || 0 });
+          items.push({ seq, name, model, unit: txt(g('unit')), qty, amount: toNum(g('amount')) || 0, maker: txt(g('maker')) });
         }
         if (items.length) out.push({ sheet: sheetName, row: h + 1, col, label, items });
         break;
@@ -458,6 +562,102 @@
     }
     return out.sort((a, b) => b.items.length - a.items.length);
   }
+
+  /* ---------- ERP 품목코드 붙이기: 별칭 사전 → 기호 무시 비교 → 품명·매입처 비교 ---------- */
+  // 사전 '확실'만 자동으로 붙이고(dict), 기호 무시 비교로 하나만 맞으면 추정(guess)으로 붙임. 나머지는 후보로만 보여 주고 사람이 고름
+  const ERP_LABEL = { dict: '사전', guess: '추정', ok: '확인함', none: 'ERP에 없음' };
+  const normM = (s) => txt(s).toUpperCase().replace(/[\s\-_.·'"`’()\[\]]/g, '');
+  const CATS = [
+    ['BUTT HINGE', /BUTTE?\s*HINGE|^HINGES?\b/i], ['PIVOT', /PIVOT/i], ['PIN HINGE', /PIN\s*HINGE/i], ['CONCEALED HINGE', /CONCEALED\s*HINGE|3D\s*ADJ/i],
+    ['CONTINUOUS HINGE', /CONTINUOUS\s*HINGE/i], ['AUTO POWER HINGE', /POWER\s*HINGE/i], ['GLASS HINGE', /GLASS\s*HINGE|SHOWER/i],
+    ['FLOOR HINGE', /FLOOR\s*(HINGE|SPRING)/i], ['DOOR CLOSER', /CLOSER/i], ['COORDINATOR', /COORDINATOR/i],
+    ['PANIC', /PANIC|EXIT\s*DEVICE/i], ['OUT-TRIM', /OUT.?TRIM/i], ['DEAD LOCK', /DEAD\s*LOCK|DEADBOLT|DEAD\s*BOLT/i],
+    ['MORTISE LOCK', /MORTISE|LOCK\s*BODY|\bLOCK\b/i], ['CYLINDER', /CYLINDER|THUMB\s*TURN/i], ['LEVER', /LEVER/i],
+    ['PUSH PULL PLATE', /PUSH|PULL\s*PLATE/i], ['PULL HANDLE', /PULL\s*HANDLE|DOOR\s*PULL/i], ['FLUSH HANDLE', /FLUSH\s*(RING\s*)?HANDLE|CUP|컵/i],
+    ['FLUSH BOLT', /FLUSH\s*BOLT/i], ['DUST PROOF', /DUST|먼지/i], ['DOOR STOP', /STOP(PER)?\b|STOPPER|STOPER/i], ['DOOR CATCH', /CATCH/i],
+    ['DOOR GUARD', /GUARD/i], ['VIEWER', /VIEWER/i], ['DIGITAL LOCK', /DIGITAL|DOOR\s*LOCK/i], ['SLIDING', /SLIDING/i],
+    ['PATCH', /PATCH/i], ['DOOR SEAL', /SEAL|씰|실$/i],
+  ];
+  const catOf = (s) => { for (const [k, re] of CATS) if (re.test(s || '')) return k; return null; };
+  // 매입처 이름이 회사마다 다르게 적히는 것 (게제코리아 = GEZE 등)
+  const BRANDS = [['STANLEY', /STANLEY|스탠리/i], ['GEZE', /GEZE|게제/i], ['DORMA', /DORMA|도르마/i], ['HAFELE', /HAFELE|HÄFELE|헤펠레|해펠레/i],
+    ['DLINE', /D\s*LINE|디라인/i], ['ASSA', /ASSA|아싸/i], ['S&G', /S\s*[&＆]\s*G/i], ['KOAS', /KOAS|코아스/i]];
+  const brandsIn = (s) => BRANDS.filter(([, re]) => re.test(s || '')).map(([k]) => k);
+  const commonPrefix = (a, b) => { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return i; };
+
+  function prepCatalog(j) {
+    const items = j.items.map(([code, name, spec, unit, supplier, search]) => {
+      const seq = [spec, search, name].join(' ').split(/[\s\[\](),\/+]+/).map(normM).filter(Boolean);
+      const joined = [];
+      for (let a = 0; a < seq.length; a++) for (let b = a + 2; b <= Math.min(seq.length, a + 3); b++) joined.push(seq.slice(a, b).join(''));
+      const sup = normM(supplier);
+      return { code, name, spec, unit, supplier, full: name + (spec ? ' [' + spec + ']' : ''), tokens: new Set(seq.filter((t) => t.length >= 2)), joined: new Set(joined),
+        cat: catOf(name + ' ' + spec), brands: brandsIn(supplier + ' ' + search + ' ' + spec), sup: sup.length >= 2 ? sup : '' };
+    });
+    state.cat = { items, byCode: new Map(items.map((i) => [i.code, i])) };
+    setAliases(j.aliases);
+  }
+  function setAliases(list) {
+    if (!state.cat) return;
+    const m = new Map();
+    (list || []).forEach((a) => { const k = normM(a.alias); if (k) (m.get(k) || m.set(k, []).get(k)).push(a); });
+    state.cat.alias = m;
+  }
+  let catLoading = null;
+  function ensureCatalog() {
+    if (state.cat) return Promise.resolve(state.cat);
+    if (!catLoading) catLoading = api('catalog').then((j) => { prepCatalog(j); return state.cat; }).finally(() => { catLoading = null; });
+    return catLoading;
+  }
+
+  // 한 품목 → { code, state, cands: [{ code, why, kind }] }
+  function matchErp(hw) {
+    const C = state.cat, out = { code: '', state: '', cands: [] };
+    if (!C) return out;
+    const add = (code, why, kind) => { if (code && !out.cands.some((c) => c.code === code)) out.cands.push({ code, why, kind }); };
+    const model = txt(hw.model);
+    const keys = [...new Set([model, ...model.split(/\s*[\/,]\s*/)].map(normM).filter((k) => k.length >= 2))];
+    // 1) 별칭 사전
+    const hits = keys.flatMap((k) => C.alias.get(k) || []);
+    const sure = [...new Set(hits.filter((a) => a.status === '확실').map((a) => a.code))];
+    sure.forEach((c) => add(c, '별칭 사전', 'dict'));
+    hits.filter((a) => a.status !== '확실').forEach((a) => add(a.code, '사전 후보 (확인 필요)', 'dictq'));
+    if (sure.length === 1) { out.code = sure[0]; out.state = 'dict'; }
+    else if (sure.length > 1) { out.code = sure[0]; out.state = 'guess'; }
+    // 2) 기호 무시 비교 — 기호를 뺀 모델이 완전히 같을 때만 (헤펠레 8자리 코드는 숫자가 하나라도 다르면 다른 제품)
+    const exact = [];
+    // 숫자가 든 조각만 모델로 봄 ('스탠리'처럼 매입처 이름만 같은 품목이 붙지 않도록)
+    for (const k of keys) {
+      if (k.length < 3 || !/\d/.test(k)) continue;
+      C.items.forEach((it) => { if (it.tokens.has(k) || (k.length >= 5 && it.joined.has(k))) exact.push(it.code); });
+    }
+    const ex = [...new Set(exact)];
+    ex.forEach((c) => add(c, '모델 일치 (기호 무시)', 'model'));
+    // 사전 후보(확인 필요)가 따로 있으면 사람이 고르도록 비워 둠
+    const dq = hits.filter((a) => a.status !== '확실').map((a) => a.code);
+    if (!out.code && ex.length === 1 && (!dq.length || dq.includes(ex[0]))) { out.code = ex[0]; out.state = 'guess'; }
+    // 3) 품명·매입처 비교 → 후보만
+    const qcat = catOf(hw.name) || catOf(model);
+    const qtext = [hw.maker, model, hw.name].join(' '), qn = normM(qtext), qb = brandsIn(qtext);
+    // 비슷함 비교는 매입처 이름을 뺀 모델 조각 중 숫자가 든 가장 긴 것으로 (STANLEY.SGH2B4540SS/스탠리 → SGH2B4540SS)
+    const bare = BRANDS.reduce((s, [, re]) => s.replace(new RegExp(re.source, 'gi'), ' '), model);
+    const k0 = bare.split(/[\/,]+/).map(normM).filter((k) => /\d/.test(k)).sort((a, b) => b.length - a.length)[0] || '';
+    const scored = [];
+    // 헤펠레 8자리 코드가 있는 품목은, 다른 8자리 코드를 가진 ERP 품목을 후보에서도 뺌 (숫자가 다르면 다른 제품)
+    const haf = keys.find((k) => /^\d{8}$/.test(k));
+    C.items.forEach((it) => {
+      if (out.cands.some((c) => c.code === it.code)) return;
+      if (haf && [...it.tokens].some((t) => /^\d{8}$/.test(t) && t !== haf)) return;
+      const supOk = (it.sup && qn.includes(it.sup)) || it.brands.some((b) => qb.includes(b));
+      let sim = 0;
+      if (k0.length >= 4 && !/^\d+$/.test(k0)) for (const t of it.tokens) { const p = commonPrefix(t, k0); if (p >= 4 && p > sim) sim = p; }
+      const catOk = qcat && it.cat === qcat;
+      if ((catOk && supOk) || (sim >= 4 && (catOk || supOk))) scored.push({ it, s: (supOk ? 3 : 0) + (catOk ? 2 : 0) + sim, why: [catOk && '같은 분류', supOk && '같은 매입처', sim && '모델 비슷함'].filter(Boolean).join(' · ') });
+    });
+    scored.sort((a, b) => b.s - a.s).slice(0, 8).forEach((x) => add(x.it.code, x.why, 'name'));
+    return out;
+  }
+  const erpText = (code) => { const it = state.cat && state.cat.byCode.get(code); return it ? it.full : ''; };
 
   async function openUpload(file) {
     const dlg = $('dlg');
@@ -476,9 +676,12 @@
       return;
     }
     const existing = state.detail.items.length, recCount = state.detail.orders.length + state.detail.deliveries.length;
+    let catErr = '';
+    await ensureCatalog().catch((e) => { catErr = e.message; });
     let ci = 0;
     const draw = () => {
       const c = cands[ci];
+      if (!c.erp) c.erp = c.items.map(matchErp);
       box.replaceChildren(el('h2', null, '엑셀로 품목 올리기'), el('div', 'fname', file.name));
       if (cands.length > 1) {
         const sel = el('select'); sel.setAttribute('aria-label', '읽을 시트');
@@ -487,14 +690,24 @@
         box.append(sel);
       }
       const maps = el('div', 'maps');
-      HEADS.forEach(([k, name]) => maps.append(c.col[k] != null ? el('span', null, `${name} ← ${c.label[k]}`) : el('span', 'miss', `${name} 열 없음`)));
+      HEADS.forEach(([k, name, , optional]) => { if (c.col[k] != null) maps.append(el('span', null, `${name} ← ${c.label[k]}`)); else if (!optional) maps.append(el('span', 'miss', `${name} 열 없음`)); });
       box.append(maps);
       const sumQ = c.items.reduce((s, it) => s + it.qty, 0), sumA = c.items.reduce((s, it) => s + it.amount, 0);
       box.append(el('p', 'note', `${c.sheet} 시트 ${c.row}행 머리글 · 품목 ${fmt(c.items.length)}개 · 수량 합계 ${fmt(sumQ)}` + (sumA ? ` · 금액 합계 ${won(sumA)}` : '')));
+      const nDict = c.erp.filter((m) => m.state === 'dict').length, nGuess = c.erp.filter((m) => m.state === 'guess').length;
+      box.append(el('p', catErr ? 'err' : 'note', catErr ? `ERP 품목코드는 붙이지 못했습니다 (${catErr}). 품목은 그대로 올릴 수 있습니다.`
+        : `ERP 품목코드: 사전으로 붙임 ${fmt(nDict)} · 추정 ${fmt(nGuess)} · 못 찾음 ${fmt(c.items.length - nDict - nGuess)}. 추정과 못 찾은 품목은 올린 뒤 품목마다 확인할 수 있습니다.`));
       const prev = el('div', 'prev');
       c.items.forEach((it, i) => {
         const r = el('div', 'pi');
         const nm = el('div'); nm.append(el('div', 'nm', it.name || '(제품명 없음)')); if (it.model) nm.append(el('div', 'model', it.model));
+        const m = c.erp[i];
+        if (!catErr) {
+          const e = el('div', 'erp');
+          if (m.code) e.append(el('span', 'code', m.code), document.createTextNode(' ' + erpText(m.code) + ' '), el('span', 'pill e-' + m.state, ERP_LABEL[m.state]));
+          else e.append(el('span', 'muted', m.cands.length ? `품목코드 후보 ${m.cands.length}개` : '품목코드 못 찾음'));
+          nm.append(e);
+        }
         r.append(el('div', 'seq', it.seq || String(i + 1)), nm, el('div', 'num', fmt(it.qty) + (it.unit ? ' ' + it.unit : '')));
         prev.append(r);
       });
@@ -514,7 +727,8 @@
         const mode = modeBox ? box.querySelector('input[name=mode]:checked').value : 'append';
         if (mode === 'replace' && !confirm(`기존 품목 ${fmt(existing)}개` + (recCount ? `와 발주·납품 기록 ${fmt(recCount)}건` : '') + '을 지우고 새 품목으로 바꿀까요? 되돌릴 수 없습니다.')) return;
         run(ok, async () => {
-          state.detail = await api('uploadHardware', { projectId: state.detail.project.id, items: c.items, mode });
+          const items = c.items.map((it, i) => Object.assign({}, it, { erpCode: c.erp[i].code, erpState: c.erp[i].state }));
+          state.detail = await api('uploadHardware', { projectId: state.detail.project.id, items, mode });
           dlg.close(); renderDetail(); toast(`품목 ${fmt(c.items.length)}개를 저장했습니다.`);
         });
       };
@@ -528,7 +742,7 @@
   function loadScript(src) { return new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = no; document.head.append(s); }); }
   (async () => {
     if (MOCK) {
-      await loadScript('dev/mock-gas.js'); await loadScript('apps-script/Code.js');
+      await loadScript('dev/mock-gas.js'); await loadScript('apps-script/Seed.js').catch(() => {}); await loadScript('apps-script/Code.js');
       window.__mockReady();
     } else if (!CFG.API_URL) {
       app.replaceChildren(el('p', 'banner bad', '아직 서버 주소가 설정되지 않았습니다. 관리자에게 알려 주세요.'));

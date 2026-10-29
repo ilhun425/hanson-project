@@ -4,3 +4,4 @@ ref/
 .clasp.json
 .clasprc.json
 node_modules/
+apps-script/Seed.js
