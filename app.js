@@ -130,7 +130,7 @@
     const tools = el('div', 'tools');
     const reload = btn('새로 고침', null, () => load(reload));
     const add = el('a', 'btn primary', '새 프로젝트'); add.href = '#/new';
-    const kt = el('a', 'btn', '카톡 확인 대기'); kt.href = '#/kakao';
+    const kt = el('a', 'btn', '단톡방 메세지 확인'); kt.href = '#/kakao';
     const ktN = el('span', 'badge'); ktN.hidden = true; kt.append(ktN);
     tools.append(reload, kt, add); head.append(ttl, tools);
 
@@ -1071,7 +1071,7 @@
     const K = state.kt.data, S = state.kt;
     const back = el('a', 'btn link back', '← 프로젝트 목록'); back.href = '#/';
     const head = el('header', 'top');
-    const ttl = el('div'); ttl.append(el('h1', null, '카톡 확인 대기'), el('p', 'lede', '단체카톡방 대화를 올리면 발주·재고출고·납품·신규 프로젝트를 찾아 여기에 모읍니다. [맞음]을 누른 것만 프로젝트에 기록됩니다.'));
+    const ttl = el('div'); ttl.append(el('h1', null, '단톡방 메세지 확인'), el('p', 'lede', '단체카톡방 대화를 올리면 발주·재고출고·납품·신규 프로젝트를 찾아 여기에 모읍니다. [맞음]을 누른 것만 프로젝트에 기록됩니다.'));
     const tools = el('div', 'tools');
     const fileIn = el('input', 'file-in'); fileIn.type = 'file'; fileIn.id = 'kt-file'; fileIn.accept = '.txt,text/plain';
     const upBtn = el('label', 'btn primary', '카톡 대화 파일 올리기'); upBtn.htmlFor = 'kt-file';
