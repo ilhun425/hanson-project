@@ -531,7 +531,6 @@ function onOpen() {
     .addSeparator()
     .addItem('재고 확인 암호 등록 (사전 연결·재고 보기용)', 'setDictPasswordPrompt')
     .addItem('별칭 사전·전체 품목 가져오기', 'importSeedMenu')
-    .addItem('카톡 해석용 Claude API 키 등록', 'setClaudeKeyPrompt')
     .addToUi();
 }
 

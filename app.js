@@ -995,7 +995,7 @@
   const siteKey = (s) => txt(s).replace(/[\s()\[\]·,.\-]/g, '').toUpperCase();
   const aliasesOf = (p) => String(p.siteAlias || '').split(',').map((a) => a.trim()).filter(Boolean);
 
-  // 카톡 현장명 → 프로젝트 후보 (Claude가 고른 것, 현장명·별칭 일치, 일부 일치)
+  // 카톡 현장명 → 프로젝트 후보 (서버 규칙이 고른 것, 현장명·별칭 일치, 일부 일치)
   function ktProjects(k) {
     const K = state.kt.data, key = siteKey(k.site), out = [];
     // 숫자를 뺀 이름("라브르27" → "라브르")과, 흔한 말이 아닌 3글자 이상 조각도 비교
@@ -1021,7 +1021,8 @@
     const haf = keys.find((x) => /^\d{8}$/.test(x));
     const tail = (/(?:^|[\s.])\.(\d{3})(?!\d)/.exec(k.model + ' ' + k.name) || [])[1];
     const codes = new Set();
-    if (state.cat) raw.forEach((m) => { const r = matchErp({ model: m, name: k.name }); if (r.state === 'dict') codes.add(r.code); });
+    // 별칭 사전: 모델명, 그리고 '키뭉치'·'엔터 모티스락'처럼 사람이 확인해 더한 제품명도
+    if (state.cat) raw.concat(k.name ? [k.name] : []).forEach((m) => { const r = matchErp({ model: m, name: k.name }); if (r.state === 'dict') codes.add(r.code); });
     const words = txt(k.name).split(/\s+/).map(normM).filter((w) => w.length >= 2);
     const out = [];
     hw.forEach((h) => {
@@ -1030,6 +1031,8 @@
       let s = 0, why = '';
       if (h.erpCode && codes.has(h.erpCode)) { s = 5; why = '별칭 사전'; }
       else if (hm && keys.some((x) => hm === x || (x.length >= 4 && hm.includes(x)) || (hm.length >= 4 && x.includes(hm)))) { s = 4; why = '모델 일치'; }
+      // "텍투스 340" → TECTUS TE340: 숫자 3자리만 같으면 약한 일치 (사람이 확인)
+      else if (hm && keys.some((x) => /^\d{3}$/.test(x) && hm.includes(x))) { s = 2; why = '모델 숫자 일치'; }
       else if (tail && h8.some((c) => c.endsWith(tail)) && (!catOf(k.name) || catOf(k.name) === catOf(h.name + ' ' + h.model))) { s = 2; why = '코드 끝자리 일치'; }
       else if (words.length && words.some((w) => hn.includes(w) || hm.includes(w))) { s = 1; why = '제품명 비슷함'; }
       if (s) out.push({ h, s, why });
@@ -1196,8 +1199,10 @@
     const newSite = p && k.site && ![p.site, ...aliasesOf(p)].some((n) => siteKey(n) === siteKey(k.site));
     let remember = null, toDict = null;
     if (newSite) { remember = el('input'); remember.type = 'checkbox'; remember.checked = true; const lb = el('label', 'tick'); lb.append(remember, el('span', null, `"${k.site}"을(를) 이 프로젝트의 현장 별칭으로 기억`)); ticks.append(lb); }
-    const dictOk = h && h.erpCode && h.erpState !== 'none' && /\d/.test(k.model) && normM(k.model) !== normM(h.model) && !(state.cat && (state.cat.alias.get(normM(k.model)) || []).some((a) => a.code === h.erpCode));
-    if (dictOk) { toDict = el('input'); toDict.type = 'checkbox'; toDict.checked = !diff; const lb = el('label', 'tick'); lb.append(toDict, el('span', null, `"${k.model}"을(를) 별칭 사전에 더하기 (품목코드 ${h.erpCode})`)); ticks.append(lb); }
+    // 카톡에 적힌 이름(모델명이 없으면 제품명)을 별칭 사전에. 숫자가 없는 이름은 여러 제품에 쓰일 수 있어 기본으로 체크하지 않음
+    const alias = txt(k.model || k.name);
+    const dictOk = h && h.erpCode && h.erpState !== 'none' && normM(alias).length >= 2 && normM(alias) !== normM(h.model) && !(state.cat && (state.cat.alias.get(normM(alias)) || []).some((a) => a.code === h.erpCode));
+    if (dictOk) { toDict = el('input'); toDict.type = 'checkbox'; toDict.checked = !diff && /\d/.test(alias); const lb = el('label', 'tick'); lb.append(toDict, el('span', null, `"${alias}"을(를) 별칭 사전에 더하기 (품목코드 ${h.erpCode})`)); ticks.append(lb); }
     if (ticks.childNodes.length) card.append(ticks);
 
     const acts = el('div', 'actions');
@@ -1205,7 +1210,7 @@
     const ok = btn('맞음', 'primary sm', (e) => {
       if (!ready) { toast(!p ? '프로젝트를 골라 주세요.' : !h ? '품목을 골라 주세요.' : '날짜와 수량을 넣어 주세요.'); if (!editing) { S.editing.add(k.id); renderKakao(); } return; }
       ktDo(e.currentTarget, k, 'confirm', { projectId: p.id, hwId: h.id, recKind: pk.recKind, fromStock: pk.fromStock, date: pk.date, qty: Number(pk.qty),
-        remember: !!(remember && remember.checked), dictPair: toDict && toDict.checked ? { code: h.erpCode, alias: k.model } : null });
+        remember: !!(remember && remember.checked), dictPair: toDict && toDict.checked ? { code: h.erpCode, alias } : null });
     });
     acts.append(ok);
     if (!editing) acts.append(btn('고치기', 'sm', () => { S.edit.set(k.id, Object.assign({}, pk)); S.editing.add(k.id); renderKakao(); }));
@@ -1266,10 +1271,11 @@
       return;
     }
     const pc = ktProjects(k);
-    if (pc.length) card.append(el('p', 'ktwarn', `비슷한 프로젝트가 이미 있습니다: ${pc.slice(0, 3).map((x) => x.p.site).join(', ')}`));
+    // 현장명은 이 줄에 적고, 버튼 글자는 짧게 (긴 현장명이 버튼 밖으로 넘치지 않도록)
+    if (pc.length) card.append(el('p', 'ktwarn', `비슷한 프로젝트가 이미 있습니다: ${pc[0].p.site}` + (pc.length > 1 ? ` (그 밖에 ${pc.slice(1, 3).map((x) => x.p.site).join(', ')})` : '') + '. 같은 현장이면 [같은 현장으로 처리]를 눌러 주세요.'));
     const acts = el('div', 'actions');
     acts.append(btn('새 프로젝트로 등록', 'primary sm', () => ktNewProject(k)));
-    if (pc.length) acts.append(btn(`"${pc[0].p.site}"과 같은 현장`, 'sm', (e) => ktDo(e.currentTarget, k, 'confirm', { projectId: pc[0].p.id, remember: true })));
+    if (pc.length) { const same = btn('같은 현장으로 처리', 'sm', (e) => ktDo(e.currentTarget, k, 'confirm', { projectId: pc[0].p.id, remember: true })); same.title = pc[0].p.site; acts.append(same); }
     acts.append(btn('건너뛰기', 'sm', (e) => ktDo(e.currentTarget, k, 'skip')));
     card.append(acts);
   }
@@ -1376,14 +1382,14 @@
     if (S.parsing) return;
     S.parsing = true;
     const head = S.note && !/해석/.test(S.note) ? S.note + ' ' : '';
-    let left = (S.data.counts['대기'] || 0) + (S.data.counts['해석중'] || 0), stop = null, size = 25;
-    const show = () => { S.note = head + `Claude가 해석하는 중… 남은 메시지 ${fmt(left)}개 (한 묶음에 수십 초 걸립니다. 이 화면을 닫아도 해석한 것은 남습니다)`; if (location.hash === '#/kakao') renderKakao(); };
+    let left = (S.data.counts['대기'] || 0) + (S.data.counts['해석중'] || 0), stop = null, size = 300;
+    const show = () => { S.note = head + `해석하는 중… 남은 메시지 ${fmt(left)}개`; if (location.hash === '#/kakao') renderKakao(); };
     show();
     const worker = async () => {
       while (!stop) {
         let j;
         try { j = await api('kakaoParse', { size }); }
-        catch (e) { if (e.code === 'network' && size > 10) { size = Math.ceil(size / 2); continue; } stop = e; return; }
+        catch (e) { if (e.code === 'network' && size > 40) { size = Math.ceil(size / 2); continue; } stop = e; return; }
         left = j.left; show();
         if (!j.parsed || !j.left) return;
       }
@@ -1400,7 +1406,7 @@
   function loadScript(src) { return new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = no; document.head.append(s); }); }
   (async () => {
     if (MOCK) {
-      await loadScript('dev/mock-gas.js'); await loadScript('apps-script/Seed.js').catch(() => {}); await loadScript('apps-script/Code.js'); await loadScript('apps-script/Kakao.js'); await loadScript('dev/mock-claude.js').catch(() => {});
+      await loadScript('dev/mock-gas.js'); await loadScript('apps-script/Seed.js').catch(() => {}); await loadScript('apps-script/Code.js'); await loadScript('apps-script/Kakao.js');
       window.__mockReady();
     } else if (!CFG.API_URL) {
       app.replaceChildren(el('p', 'banner bad', '아직 서버 주소가 설정되지 않았습니다. 관리자에게 알려 주세요.'));

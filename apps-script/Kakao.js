@@ -1,11 +1,9 @@
 /* 카톡 발주 내역 가져오기 — 단체카톡방 대화 내보내기(txt)에서 발주·재고출고·납품·신규 프로젝트를 찾아 '카톡 확인 대기'로 보여 줌
  * 화면이 txt를 읽어 메시지로 나누고(전화번호·계좌번호는 지움) 올리면, 여기서 중복을 거르고 저장한 뒤
- * Claude API로 문장을 해석합니다. 사람이 화면에서 [맞음]을 눌러야만 발주·납품 시트에 기록됩니다.
- * Claude API 키는 스프레드시트 메뉴 [핸썬 관리 > 카톡 해석용 Claude API 키 등록]으로 스크립트 속성에만 저장합니다. */
+ * 규칙으로 문장을 해석합니다 (유료 API를 쓰지 않음). 사람이 화면에서 [맞음]을 눌러야만 발주·납품 시트에 기록됩니다. */
 
-const KAKAO_MODEL = 'claude-opus-5-5';
 const KAKAO_KINDS = ['발주', '재고출고', '납품', '신규프로젝트'];
-// 해석할 만한 메시지 (발주·출고·수량 표현). 나머지는 '해석 안 함'으로 두고, 앞뒤 문맥으로만 Claude에 보여 줌
+// 해석할 만한 메시지 (발주·출고·수량 표현). 나머지는 '해석 안 함'으로 두고, 현장명을 찾을 때 앞뒤 문맥으로만 씀
 const KAKAO_HINT = /발주|오더|출고|입고|납품|발송|배송|택배|신규|재고|정정|추가|취소|반품|회수|구매|세트|\d\s*(개|ea|set|조|본|매|짝|롤|장|ctn|박스|m\b)|\bX\)/i;
 
 /* ---------------- 메시지 올리기 ---------------- */
@@ -54,13 +52,11 @@ function kakaoSetState(ids, st) {
 
 const byWhen = (a, b) => (a.date + a.time).localeCompare(b.date + b.time);
 
-/* ---------------- Claude로 해석 ---------------- */
+/* ---------------- 해석 ---------------- */
 
 // 메시지 size개씩 해석. 화면이 남은 메시지가 없을 때까지 여러 번 부름
 function kakaoParse(size) {
-  size = Math.min(40, Math.max(5, Number(size) || 25));
-  const apiKey = props().getProperty('CLAUDE_API_KEY');
-  if (!apiKey) fail('no_api_key', '카톡 해석용 Claude API 키가 아직 없습니다. 관리자가 스프레드시트 메뉴 [핸썬 관리 > 카톡 해석용 Claude API 키 등록]을 해 주세요.');
+  size = Math.min(500, Math.max(5, Number(size) || 300));
   // 1) 해석할 메시지를 '해석중'으로 잡아 둠 (여러 사람이 동시에 눌러도 같은 메시지를 두 번 해석하지 않도록)
   const job = withLock(() => {
     const all = readAll('kmsg').map((m, i) => Object.assign(m, { i })).sort((a, b) => byWhen(a, b) || a.i - b.i);
@@ -79,104 +75,223 @@ function kakaoParse(size) {
   if (!job) return { parsed: 0, left: 0, counts: kakaoCounts() };
   const ids = job.targets.map((m) => m.id);
   let entries;
-  try { entries = kakaoAsk(apiKey, job); }
-  catch (e) {
-    withLock(() => kakaoSetState(ids, e.code === 'ai_failed' ? '실패' : '대기'));
-    throw e;
-  }
+  try { entries = kakaoRules(job); }
+  catch (e) { console.error(e && e.stack || e); withLock(() => kakaoSetState(ids, '실패')); fail('parse_failed', '메시지를 해석하다 문제가 생겼습니다. [해석 못 한 메시지 다시 해석]을 눌러 주세요.'); }
   // 2) 결과를 '카톡 확인 대기'에 저장
   const added = withLock(() => { const n = kakaoStore(job, entries); kakaoSetState(ids, '해석함'); return n; });
   const counts = kakaoCounts();
   return { parsed: ids.length, added, left: counts['대기'] || 0, counts };
 }
 
-const KAKAO_PROMPT = `당신은 도어 하드웨어 유통 회사 핸썬(Hanson)의 업무 기록 담당입니다.
-회사 단체카톡방 메시지에서 하드웨어 발주, 재고출고, 납품, 신규 프로젝트 소식을 찾아 JSON으로 정리합니다.
-사람이 나중에 하나씩 확인하므로, 확실하지 않은 것도 찾아서 note에 의문점을 적어 주세요. 다만 없는 내용을 지어내지는 마세요.
+/* ---------------- 규칙으로 해석 ---------------- */
+// 비용 없이 규칙만으로 읽음. 형식이 특이한 글은 놓치거나 틀릴 수 있어, 사람이 확인 화면에서 고치고 [맞음]을 누름
 
-종류(kind):
-- 발주: 핸썬이 매입처(제조사·대리점)에 물건을 주문함. "발주완료", "오더완료", "OO에 발주", "추가발주". supplier에 매입처(예: 헤펠레, 큐브텍, 이노, 세한루체, 금동, 현대정밀).
-- 재고출고: 핸썬이 가진 재고에서 꺼내 현장이나 고객에게 보냄. "재고출고", "(재고)", "재고 + ..." 등. 품목마다 fromStock=true.
-- 납품: 물건이 현장이나 고객에게 감. "납품", "납품완료", "현장 출고", "퀵출고", "OO 매입분 출고". 핸썬 재고에서 나간 품목은 fromStock=true, 매입해서 바로 보낸 품목은 false.
-  한 메시지에 재고출고 품목과 매입분 품목이 섞여 있으면 kind는 납품으로 하고 품목마다 fromStock을 구분하세요.
-  다른 회사(매입처)의 재고에서 나간 것("무진금속 재고 출고")은 핸썬 재고가 아니므로 fromStock=false.
-- 신규프로젝트: "신규 프로젝트", "신규현장" 소식. newProject에 현장명, 설계사, 설계담당자, 시공사(발주처), 시공담당자, 금액(원).
-결제 요청, 계산서, 입금, 차량, 인사, 일정 같은 메시지는 건너뜁니다. 단순 사진 설명이나 주소도 건너뜁니다.
+// 수량: "8개", "1EA", "2세트", "5개발주"(붙어 쓴 것). 괄호 속 "(재고9개)"처럼 남은 재고 수량은 뺌
+const KR_QTY = /(\d+(?:\.\d+)?)\s*(개|ea|세트|set|조|본|매|짝|장|롤|박스|ctn)(?![A-Za-z])/gi;
+const KR_NOISE = /(추가\s*)?발주(완료|합니다|건입니다|건)?|오더(\s*완료)?|재고\s*출고|출고|납품(완료|용)?|구매(건)?|입니다|합니다|완료|선불|착불|퀵|택배|화물|발송|직납|부탁드립니다|부탁합니다|\S+님(?=\s|$)/g;
+// 현장 후보로 쓰지 않을 줄: 주소, 전화번호, 경로(A>B), 키:값, 운송·결제 안내
+const KR_NOT_SITE = /\[(전화번호|번호)\]|[>→]|:|\d+(번길|길|로)\s*\d|[가-힣]+(구|시|군|읍|면)\s+[가-힣]+(동|로|길|리|읍|면)|택배|화물|퀵|발송|오더|발주|출고|납품|입고|예약|계산서|결제|^\*|^-|\?$/;
+const KR_MODEL = /[A-Za-z0-9][A-Za-z0-9.\-\/#]*\d[A-Za-z0-9.\-]*/;
+const KR_GENERIC = /^(현장|주택|단독주택|기숙사|사옥|오피스|빌딩|센터|병원|호텔|리테일|신축|공사|레지던스|하드웨어)$/;
+const KR_SUPPLIERS = ['헤펠레', '큐브텍', '이노', '세한루체', '루체', '금동', '현대정밀', '도무스메탈', '도무스', '스카이하드웨어', '에스엠', '성동', '보성정밀', '코아스', '까마', '범진', '문앤문', '메탈사이트', '메탈싸이트', '남선', '무진금속', '도르마', '스탠리', '게제', '가와준', '얼리젼'];
 
-규칙:
-- date: 일이 일어난 날. 본문에 "(10/1일 라브르27 납품)"처럼 날짜가 있으면 그 날짜(연도는 메시지 날짜의 연도), 없으면 메시지 날짜. YYYY-MM-DD.
-- site: 본문에 적힌 현장명 그대로 (예: "라브르27", "현대차 납양기숙사"). 회사명만 있고 현장이 없으면 빈 문자열.
-- projectId: 프로젝트 목록 중 같은 현장이 분명하면 그 id. 오타·줄임말·띄어쓰기 차이("현대차 납양기숙사" = "현대차 남양 기숙사", "라브르" = "두양 라브르")도 같은 현장으로 봅니다. 애매하면 빈 문자열.
-- items: 품목마다 하나. name은 적힌 제품명(예: "엔터 모티스락", "키뭉치"), model은 적힌 모델·코드(예: "SGM55AL24CN", "911.02.145", "pck67") 그대로.
-  aka에는 같은 제품을 가리키는 다른 표기를 확실할 때만 적습니다 (예: "텍투스340" → "TECTUS TE340", "플로어힌지 .320" → "932.79.320", "액티브스탑" → "ACTIVE STOP").
-  헤펠레 8자리 코드(000.00.000)는 숫자 하나만 달라도 다른 제품이니 추측해서 바꾸지 마세요.
-  qty는 숫자(모르면 null). unit은 적힌 단위(개, 세트, EA 등).
-- 한 메시지에 현장이 여러 개면 현장마다 entry를 나눕니다.
-- 같은 내용이 품목 목록 메시지와 그 뒤의 정리 메시지에 두 번 나오면, 더 자세한 쪽 하나만 entry로 만듭니다 (msg는 그 메시지).
-- 정정: "A 1개 (B 1개 X)"처럼 앞에서 말한 품목·수량을 고치는 메시지는, 고친 내용으로 entry를 만들고 corrects에 고쳐진 원래 메시지(msg)와 틀렸던 모델명(model)을 적습니다.
-- purpose: 샘플 제출용이면 "샘플", 하자보수용이면 "하자보수", 아니면 빈 문자열.
-- dest: 보내는 곳이 현장이면 "현장", "사무실입고"·"핸썬 택배"처럼 사무실·창고면 "사무실·창고", 모르면 빈 문자열.
-- msg에는 아래 '해석할 메시지'의 번호(m1, m2 …)만 씁니다. '앞뒤 문맥' 메시지(c1, c2 …)는 참고만 하고 entry로 만들지 않습니다 (정정 대상 corrects.msg로는 쓸 수 있음).
-- 해당하는 메시지가 없으면 entries를 빈 배열로 둡니다.`;
-
-const KAKAO_SCHEMA = (() => {
-  const S = { type: 'string' }, N = { anyOf: [{ type: 'number' }, { type: 'null' }] };
-  const obj = (props) => ({ type: 'object', properties: props, required: Object.keys(props), additionalProperties: false });
-  const item = obj({ name: S, model: S, aka: { type: 'array', items: S }, qty: N, unit: S, fromStock: { type: 'boolean' } });
-  const np = obj({ site: S, designer: S, designManager: S, builder: S, clientManager: S, amount: N });
-  const entry = obj({
-    msg: S, kind: { type: 'string', enum: KAKAO_KINDS }, date: S, site: S, projectId: S, supplier: S, designer: S, builder: S,
-    purpose: { type: 'string', enum: ['', '샘플', '하자보수'] }, dest: { type: 'string', enum: ['', '현장', '사무실·창고'] },
-    items: { type: 'array', items: item },
-    newProject: { anyOf: [np, { type: 'null' }] },
-    corrects: { anyOf: [obj({ msg: S, model: S }), { type: 'null' }] },
-    note: S,
+function kakaoRules(job) {
+  const projects = readAll('project');
+  // 프로젝트 이름표: 현장명·별칭 전체, 숫자 뺀 이름, 3글자 이상 조각
+  const names = [];
+  projects.forEach((p) => {
+    [p.site].concat(String(p.siteAlias || '').split(',')).map((s) => s.trim()).filter(Boolean).forEach((n) => {
+      const k = siteKey(n);
+      if (k.length >= 2) names.push({ p, n, k, w: 3 });
+      const bare = k.replace(/\d+/g, '');
+      if (bare.length >= 3 && bare !== k) names.push({ p, n, k: bare, w: 2 });
+      n.split(/[\s,·()\/\-]+/).map(siteKey).filter((x) => x.length >= 3 && !KR_GENERIC.test(x) && x !== k).forEach((x) => names.push({ p, n, k: x, w: 1 }));
+    });
   });
-  return obj({ entries: { type: 'array', items: entry } });
-})();
-
-function kakaoAsk(apiKey, job) {
-  const labels = new Map(), back = new Map();
-  let m = 0, c = 0;
-  const targetIds = new Set(job.targets.map((t) => t.id));
-  job.window.forEach((x) => { const l = targetIds.has(x.id) ? 'm' + (++m) : 'c' + (++c); labels.set(x.id, l); back.set(l, x.id); });
-  const line = (x) => `[${labels.get(x.id)}] ${x.date} ${x.time} ${x.sender}: ${x.text}`;
-  const ctx = job.window.filter((x) => !targetIds.has(x.id));
-  const user = (ctx.length ? '앞뒤 문맥 (참고만):\n' + ctx.map(line).join('\n') + '\n\n' : '') +
-    '해석할 메시지:\n' + job.targets.map(line).join('\n');
-  const projects = readAll('project').map((p) => [p.id, p.site, p.siteAlias, p.designer, p.builder, p.status].join(' | ')).join('\n');
-  const body = {
-    model: KAKAO_MODEL, max_tokens: 16000,
-    output_config: { effort: 'medium', format: { type: 'json_schema', schema: KAKAO_SCHEMA } },
-    system: [{ type: 'text', text: KAKAO_PROMPT }, { type: 'text', text: '프로젝트 목록 (id | 현장명 | 현장 별칭 | 설계사 | 시공사 | 현 상황):\n' + (projects || '(아직 없음)') }],
-    messages: [{ role: 'user', content: user }],
+  const findProject = (text) => {
+    const key = siteKey(text);
+    let best = null;
+    names.forEach((x) => { if (key.includes(x.k) && (!best || x.w > best.w || (x.w === best.w && x.k.length > best.k.length))) best = x; });
+    return best;
   };
-  // 안전 분류기가 거절하면 서버에서 다른 모델로 다시 시도 (fallbacks). 이 옵션을 받지 않으면 빼고 한 번 더
-  let res = kakaoFetch(apiKey, Object.assign({ fallbacks: 'default', cache_control: { type: 'ephemeral' } }, body), 'server-side-fallback-2026-07-01');
-  if (res.code === 400) res = kakaoFetch(apiKey, body, '');
-  if (res.code === 401 || res.code === 403) fail('ai_key', 'Claude API 키가 맞지 않습니다. 관리자가 [핸썬 관리 > 카톡 해석용 Claude API 키 등록]을 다시 해 주세요.');
-  if (res.code === 429 || res.code >= 500) fail('ai_busy', 'Claude 서버가 바쁩니다. 잠시 뒤 [해석 이어 하기]를 눌러 주세요.');
-  if (res.code !== 200) {
-    console.error(res.text);
-    let why = ''; try { why = JSON.parse(res.text).error.message || ''; } catch (e) {}
-    fail('ai_error', 'Claude API 요청이 거절되었습니다 (' + res.code + (why ? ': ' + clip(why, 160) : '') + '). 관리자에게 알려 주세요.');
+  const targetIds = new Set(job.targets.map((t) => t.id));
+  const out = [];
+  let last = null; // 바로 앞 메시지에서 찾은 현장 (현장명 없이 이어 쓴 글에 씀)
+  job.window.forEach((m) => {
+    const res = kakaoRuleOne(m, findProject, job.window);
+    if (res.site) last = { site: res.site, projectId: res.projectId, at: m.date + m.time, date: m.date, mins: kakaoMins(m.time) };
+    if (!targetIds.has(m.id)) return;
+    res.entries.forEach((e) => {
+      if (!e.site && e.kind !== '신규프로젝트' && last && last.date === m.date && kakaoMins(m.time) - last.mins <= 60 && last.site) {
+        e.site = last.site; e.projectId = last.projectId; e.note = clip(('현장명이 없어 바로 앞 메시지의 현장으로 추정했습니다. ' + e.note).trim(), 500);
+      }
+      out.push(Object.assign({ msg: m.id }, e));
+    });
+  });
+  return out;
+}
+const kakaoMins = (t) => { const a = String(t).split(':'); return Number(a[0]) * 60 + Number(a[1]); };
+
+// 메시지 하나 → { site, projectId, entries }
+function kakaoRuleOne(m, findProject, win) {
+  const text = String(m.text), lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const none = { site: '', projectId: '', entries: [] };
+  if (!lines.length) return none;
+  const base = { kind: '', date: m.date, site: '', projectId: '', supplier: '', designer: '', builder: '', purpose: '', dest: '', items: [], newProject: null, corrects: null, note: '' };
+  // 신규 프로젝트
+  if (/신규\s*(프로젝트|현장)/.test(text)) {
+    const at = lines.findIndex((l) => /신규\s*(프로젝트|현장)/.test(l));
+    const np = kakaoNewProject(lines.slice(at + 1), lines[at]);
+    if (np.site || np.designer || np.amount) {
+      const hit = np.site ? findProject(np.site) : null;
+      return { site: np.site, projectId: hit ? hit.p.id : '', entries: [Object.assign({}, base, { kind: '신규프로젝트', site: np.site, designer: np.designer, builder: np.builder, newProject: np })] };
+    }
+    return none;
   }
-  const out = JSON.parse(res.text);
-  const text = (out.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-  if (out.stop_reason === 'refusal' || out.stop_reason === 'max_tokens' || !text) fail('ai_failed', '이 메시지들은 해석하지 못했습니다. [해석 못 한 메시지 다시 해석]으로 다시 시도할 수 있습니다.');
-  let parsed;
-  try { parsed = JSON.parse(text); } catch (e) { fail('ai_failed', '해석 결과를 읽지 못했습니다.'); }
-  return (parsed.entries || []).map((e) => Object.assign(e, { msg: back.get(e.msg) || '', corrects: e.corrects && back.get(e.corrects.msg) ? { msg: back.get(e.corrects.msg), model: e.corrects.model } : null }))
-    .filter((e) => targetIds.has(e.msg));
+  if (/계산서|결제\s*\d+\s*건|거래명세서/.test(text) || (lines.length === 1 && /\?\s*$/.test(text))) return none;
+  // 날짜: "(10/1일 라브르27 납품)"
+  let date = m.date, dsite = '';
+  const dm = /(\d{1,2})\s*\/\s*(\d{1,2})\s*일?\s*([^()\n]*?)\s*(납품|출고|발주)/.exec(text);
+  if (dm) {
+    const d = m.date.slice(0, 4) + '-' + String(dm[1]).padStart(2, '0') + '-' + String(dm[2]).padStart(2, '0');
+    if (isDate(d)) date = d;
+    dsite = dm[3].replace(/^HW\w+_/, '').trim();
+  }
+  // 정정: "A 1개 (B 1개 X)"
+  let corrects = null, body = text;
+  const cm = /\(([^()]*?)\s*[Xx×]\s*\)/.exec(text);
+  if (cm) {
+    const wrong = (cm[1].match(/[A-Za-z0-9][A-Za-z0-9.\-\/]*\d[A-Za-z0-9.\-]*/) || [cm[1].replace(KR_QTY, '').trim()])[0];
+    const prev = win.filter((x) => (x.date + x.time) <= (m.date + m.time) && x.id !== m.id && wrong && normModel(x.text).includes(normModel(wrong))).pop();
+    if (prev) corrects = { msg: prev.id, model: wrong, prevText: prev.text };
+    body = text.replace(cm[0], ' ');
+  }
+  const kindText = corrects ? corrects.prevText + '\n' + body : body;
+  const isOrder = /발주|오더|구매/.test(kindText) && !/재고\s*출고|납품\s*완료/.test(kindText);
+  const isOut = /납품|출고|입고|발송|배송|퀵|직납/.test(kindText);
+  if (!isOrder && !isOut) return none;
+  const allStock = /재고\s*출고|재고출고|-\s*재고\s*-/.test(kindText) && !/매입|발주/.test(kindText);
+  // 품목 줄
+  const items = [];
+  body.split('\n').forEach((line) => {
+    if (/\d\s*원|만원|부가세|계산서|입금|@|\[번호\]|예약/.test(line)) return;
+    const ln = line.replace(/^\s*(?:[-*·•]\s*|\d+[.)]\s+)/, '');
+    const hits = [];
+    let q;
+    KR_QTY.lastIndex = 0;
+    while ((q = KR_QTY.exec(ln))) {
+      const before = ln.slice(Math.max(0, q.index - 6), q.index);
+      if (/(잔여)?재고\s*$/.test(before) || /\((잔여)?재고\s*$/.test(before)) continue;
+      hits.push({ i: q.index, end: q.index + q[0].length, qty: Number(q[1]), unit: q[2] });
+    }
+    hits.forEach((h, j) => {
+      let seg = ln.slice(j ? hits[j - 1].end : 0, h.i);
+      const after = ln.slice(h.end, j + 1 < hits.length ? hits[j + 1].i : ln.length);
+      if (!seg.replace(/[\s\-:,·]/g, '')) seg = after.split(/\s{2,}|[,(]/)[0];
+      const stock = allStock || /재고\s*출고|\(\s*재고|재고\s*\+|재고\s*\)|\(재고\)/.test(seg + ' ' + after);
+      const isite = /:\s*(.+)$/.exec(after);
+      const it = kakaoItem(seg);
+      // 괄호 속 모델 (수량 뒤에 적은 "(911.02.145)"도)
+      if (!it.model) { const pm = /\(([^()]*)\)/.exec(seg + ' ' + after); const mm = pm && KR_MODEL.exec(pm[1]); if (mm && !/^\d+$/.test(mm[0])) it.model = mm[0]; }
+      const sv = isite && isite[1].replace(/\(.*$/, '').trim();
+      items.push(Object.assign(it, { qty: h.qty, unit: h.unit, fromStock: !!stock, site: sv && sv.length <= 30 && !/\[/.test(sv) ? sv : '' }));
+    });
+  });
+  const kept = items.filter((x) => x.name || x.model);
+  if (!kept.length) return none;
+  const kind = isOrder ? '발주' : kept.every((x) => x.fromStock) ? '재고출고' : '납품';
+  // 현장: 프로젝트 이름 → 날짜 줄 → 첫 줄(머리) → "OO 현장"
+  let site = '', projectId = '';
+  const hit = findProject(text);
+  if (hit) { site = hit.n; projectId = hit.p.id; }
+  else if (dsite) site = dsite;
+  else {
+    // "현장명 : OO", "현장면-OO" 줄
+    const lm = /(?:^|\n)\s*현장\s*(?:명|면)?\s*[-:：]\s*([^\n]+)/.exec(text);
+    if (lm) site = kakaoClean(lm[1]);
+    // "OO 현장"이라고 쓴 곳이 있으면 같은 줄의 그 앞 낱말 1~2개 (한글이 든 것만)
+    const hm = !site && /([가-힣A-Za-z0-9]{2,}(?:[ \t]+[가-힣A-Za-z0-9]{2,})?)[ \t]*현장(?!사무실)/.exec(text.replace(/\d+(?:\.\d+)?\s*(개|ea|세트|set|조|본|매|짝|장|롤|박스|ctn)/gi, ' ').replace(/[^\s]*[>→][^\s]*/g, ' '));
+    if (hm && /[가-힣]/.test(hm[1]) && !/^(으로|에|로)$/.test(hm[1])) site = kakaoClean(hm[1]);
+    // 아니면 수량·주소·운송 안내가 없는 줄 (보통 첫 줄). "시공사-현장"이면 나눔
+    if (!site) for (const l of lines) {
+      KR_QTY.lastIndex = 0;
+      if (KR_QTY.test(l) || KR_NOT_SITE.test(l) || l.length > 40 || KR_MODEL.test(l.replace(/\d+[-.]\d+$/, ''))) continue;
+      const parts = l.split(/\s*[-–]\s*/);
+      const two = parts.length === 2 && parts.every((p) => /[가-힣]{2}/.test(p));
+      const cand = kakaoClean(two ? parts[1] : l);
+      if (cand.length >= 2 && !/^(재고|신규)/.test(cand)) { site = cand; if (two) base.builder = kakaoClean(parts[0]); break; }
+    }
+  }
+  KR_QTY.lastIndex = 0;
+  // 매입처: "헤펠레>핸썬", "OO에 발주", 아는 매입처 이름
+  // 매입처: "헤펠레>핸썬", "OO에 발주", 아니면 아는 매입처가 하나만 나올 때
+  const known = KR_SUPPLIERS.filter((x) => text.includes(x) && !KR_SUPPLIERS.some((y) => y !== x && y.includes(x) && text.includes(y)));
+  const supplier = (/([가-힣A-Za-z]+)\s*[>→]/.exec(text) || [])[1] || (/([가-힣A-Za-z]+)에\s*발주/.exec(text) || [])[1] || (known.length === 1 ? known[0] : '');
+  const dest = /사무실\s*(입고|배송)|[>→]\s*(핸썬|사무실)|창고\s*입고/.test(text) ? '사무실·창고' : /현장/.test(text) ? '현장' : '';
+  const purpose = /샘플/.test(text) ? '샘플' : /하자/.test(text) ? '하자보수' : '';
+  const note = [/취소/.test(text) && '취소라는 말이 있습니다. 내용을 확인해 주세요.', cm && !corrects && '정정 표시(X)가 있지만 고친 원래 메시지를 찾지 못했습니다.'].filter(Boolean).join(' ');
+  // 품목에 따로 적힌 현장(예: "DB300 5개 : 디아키즈건설 이태원현장")이 있으면 현장마다 나눔
+  const groups = new Map();
+  kept.forEach((x) => { const s = x.site || ''; (groups.get(s) || groups.set(s, []).get(s)).push(x); });
+  // 품목 이름에 섞인 현장명·시공사 이름은 뺌
+  const strip = [site, base.builder, hit && hit.n].filter((x) => x && x.length >= 2);
+  kept.forEach((x) => { strip.forEach((w) => { x.name = x.name.split(w).join(' '); }); x.name = x.name.replace(/\s+/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '').trim(); });
+  const entries = [...groups.entries()].map(([s, its]) => {
+    const h2 = s ? findProject(s) : null;
+    return Object.assign({}, base, { kind, date, site: s ? (h2 ? h2.n : kakaoClean(s)) : site, projectId: s ? (h2 ? h2.p.id : '') : projectId,
+      supplier, dest, purpose, note, corrects: corrects ? { msg: corrects.msg, model: corrects.model } : null,
+      items: its.map((x) => ({ name: x.name, model: x.model, aka: [], qty: x.qty, unit: x.unit, fromStock: x.fromStock })) });
+  });
+  return { site, projectId, entries };
 }
 
-function kakaoFetch(apiKey, body, beta) {
-  const headers = { 'x-api-key': apiKey, 'anthropic-version': '2026-10-21' };
-  if (beta) headers['anthropic-beta'] = beta;
-  let r;
-  try { r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', headers, payload: JSON.stringify(body), muteHttpExceptions: true }); }
-  catch (e) { console.error(e); fail('ai_busy', 'Claude 서버에서 답이 늦습니다. 잠시 뒤 [해석 이어 하기]를 눌러 주세요.'); }
-  return { code: r.getResponseCode(), text: r.getContentText() };
+// 품목 글 → 제품명 / 모델명 (영문·숫자가 섞인 조각을 모델명으로)
+function kakaoItem(seg) {
+  const s = String(seg).replace(/\([^)]*\)/g, ' ').replace(KR_NOISE, ' ').replace(/[>→].*$/, ' ').replace(/[\s\-:,·]+$|^[\s\-:,·]+/g, '').replace(/\s+/g, ' ').trim();
+  const models = [], words = [];
+  s.split(' ').forEach((t) => {
+    const c = t.replace(/^[\-:,]+|[\-:,]+$/g, '');
+    if (!c) return;
+    if (/^[A-Za-z0-9][A-Za-z0-9.\-\/#]*$/.test(c) && /\d/.test(c) && c.length >= 3) models.push(c);
+    else if (/^\.\d{3}$/.test(c)) models.push(c); // 헤펠레 끝자리만 적은 것 (.320)
+    else words.push(c.replace(/-(?=[A-Za-z0-9.]*\d)/, ' ').trim());
+  });
+  // "레버핸들-900.92.487" 처럼 붙여 쓴 모델
+  const name = words.join(' ').replace(/\s+/g, ' ').trim();
+  const glued = /^(.*?[가-힣])[-\s]?([A-Za-z0-9][A-Za-z0-9.\-]*\d[A-Za-z0-9.\-]*)$/.exec(name);
+  if (glued && !models.length) return { name: glued[1].trim(), model: glued[2] };
+  return { name, model: models.join(' ') };
+}
+const kakaoClean = (s) => clip(String(s || '').replace(/^HW\w+_/, '').replace(/\(.*?\)/g, ' ').replace(KR_NOISE, ' ').replace(/[>→].*$/, ' ').replace(/\s+/g, ' ').replace(/^[\s\-:,]+|[\s\-:,]+$/g, ''), 60);
+
+// 신규 프로젝트 글: "설계사 : 구도" 같은 줄, 또는 현장명 / "간삼건축 - 안해영수석" / "61,000,000" 순서의 줄
+function kakaoNewProject(lines, head) {
+  const np = { site: '', designer: '', designManager: '', builder: '', clientManager: '', amount: null };
+  const rest = [];
+  const headRest = String(head || '').replace(/신규\s*(프로젝트|현장)(입니다)?/, '').replace(/^[\s\/:,\-]+/, '').trim();
+  if (headRest) rest.push(headRest);
+  lines.forEach((l) => {
+    const kv = /^(.+?)\s*[:：]\s*(.+)$/.exec(l);
+    if (kv) {
+      const k = kv[1].replace(/\s/g, ''), v = kv[2].trim();
+      if (/현장/.test(k)) np.site = v;
+      else if (/설계/.test(k)) np.designer = v;
+      else if (/담당/.test(k)) np.designManager = v;
+      else if (/발주처|시공|건설/.test(k)) np.builder = v;
+      else if (/금액|예산/.test(k)) np.amount = Number(v.replace(/[^\d]/g, '')) || null;
+      return;
+    }
+    rest.push(l);
+  });
+  rest.forEach((l) => {
+    const digits = l.replace(/[,\s원]/g, '');
+    if (/^\d{5,}$/.test(digits)) { if (np.amount == null) np.amount = Number(digits); return; }
+    const dash = /^(.+?)\s*[-–]\s*(.+)$/.exec(l);
+    if (dash && !np.designer) { np.designer = dash[1].trim(); np.designManager = np.designManager || dash[2].trim(); return; }
+    if (!np.site) np.site = l;
+  });
+  ['site', 'designer', 'designManager', 'builder', 'clientManager'].forEach((k) => { np[k] = clip(np[k], 100); });
+  return np;
 }
 
 // 해석 결과 → '카톡 확인 대기' 행. 정정 메시지는 아직 확인 전인 원래 건을 '정정됨'으로 돌림
@@ -290,17 +405,4 @@ function kakaoAddSiteAlias(p, name) {
   list.push(name);
   p.siteAlias = clip(list.join(', '), 500);
   writeRows('project', rowIndexOf('project', p.id), [p]);
-}
-
-/* ---------------- 관리자 메뉴 ---------------- */
-
-function setClaudeKeyPrompt() {
-  const ui = SpreadsheetApp.getUi();
-  const r = ui.prompt('카톡 해석용 Claude API 키 등록', 'Anthropic 콘솔(console.anthropic.com)에서 만든 API 키(sk-ant-로 시작)를 붙여 넣어 주세요. 키는 이 스크립트의 속성에만 저장되고 화면으로는 보내지 않습니다. 비워 두고 확인을 누르면 키를 지웁니다.', ui.ButtonSet.OK_CANCEL);
-  if (r.getSelectedButton() !== ui.Button.OK) return;
-  const key = r.getResponseText().trim();
-  if (!key) { props().deleteProperty('CLAUDE_API_KEY'); ui.alert('Claude API 키를 지웠습니다.'); return; }
-  if (!/^sk-ant-/.test(key)) { ui.alert('sk-ant-로 시작하는 API 키가 아닙니다. 다시 확인해 주세요.'); return; }
-  props().setProperty('CLAUDE_API_KEY', key);
-  ui.alert('Claude API 키를 저장했습니다.');
 }
