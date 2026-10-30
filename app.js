@@ -17,7 +17,7 @@
 
   const TKEY = 'hp-token';
   const store = { get() { try { return localStorage.getItem(TKEY); } catch { return null; } }, set(v) { try { localStorage.setItem(TKEY, v); } catch {} }, del() { try { localStorage.removeItem(TKEY); } catch {} } };
-  const state = { token: store.get(), statuses: [], list: null, filter: null, q: '', sort: 'recent', detail: null, open: new Set() };
+  const state = { token: store.get(), statuses: [], list: null, filter: null, q: '', sort: 'recent', detail: null, open: new Set(), erpOpen: new Set(), stock: null };
 
   /* ---------- 서버 ---------- */
   async function api(action, data) {
@@ -208,6 +208,7 @@
     catch (e) { if (e.code !== 'auth' && location.hash === '#/p/' + id) app.replaceChildren(back, el('p', 'err', e.message)); return; }
     // ERP 품목명을 보여 주려고 품목 목록을 한 번 불러 둠 (실패해도 화면은 그대로)
     if (!state.cat && state.detail.items.length) ensureCatalog().then(() => { if (location.hash === '#/p/' + id) renderDetail(); }).catch(() => {});
+    if (state.detail.items.some((it) => it.erpCode)) ensureStock().then(() => { if (location.hash === '#/p/' + id) renderDetail(); });
   }
 
   function renderDetail() {
@@ -251,6 +252,18 @@
       }));
       if (todo.some((it) => !it.erpState)) up.append(again);
     }
+    // 핸썬 재고 기준 시각 (품목코드가 붙은 품목이 있을 때만)
+    if (d.items.some((it) => it.erpCode)) {
+      const st = state.stock, line = el('p', 'lede stockline');
+      if (stockLoading || !st) line.textContent = '핸썬 재고를 불러오는 중…';
+      else if (st.error) { line.classList.add('bad'); line.textContent = '핸썬 재고: ' + st.error; }
+      else line.textContent = `핸썬 재고: ${st.time || '시각 모름'} 기준 가용 수량 (반입재 + 상용재고)`;
+      if (st && !stockLoading) {
+        const re = btn('재고 새로 불러오기', 'link sm', () => { re.disabled = true; ensureStock(true).then(() => { if (state.detail === d) renderDetail(); }); });
+        line.append(' ', re);
+      }
+      ht.append(line);
+    }
     const fileIn = el('input', 'file-in'); fileIn.type = 'file'; fileIn.id = 'hw-file'; fileIn.accept = '.xlsx,.xlsm,.xls,.csv';
     const upBtn = el('label', 'btn primary', '엑셀로 품목 올리기'); upBtn.htmlFor = 'hw-file';
     fileIn.onchange = () => { const f = fileIn.files[0]; fileIn.value = ''; if (f) openUpload(f); };
@@ -260,7 +273,7 @@
     if (!c.items.length) tbl.append(el('div', 'empty', '아직 품목이 없습니다. 견적서나 스펙 엑셀을 올려 주세요.'));
     else {
       const hd = el('div', 'irow head'); hd.setAttribute('role', 'row');
-      ['순번', '제품명 · 모델명', '단위', '수량', '금액', '발주 (누계 · 남음)', '납품 (누계 · 남음)', ''].forEach((t, k) => { const x = el('div', k >= 3 && k <= 4 ? 'num' : '', t); x.setAttribute('role', 'columnheader'); hd.append(x); });
+      ['순번', '제품명 · 모델명', '단위', '현장수량', '재고', '금액', '발주 (누계 · 남음)', '납품 (누계 · 남음)', ''].forEach((t, k) => { const x = el('div', k >= 3 && k <= 5 ? 'num' : '', t); x.setAttribute('role', 'columnheader'); hd.append(x); });
       tbl.append(hd);
       c.items.forEach((x) => tbl.append(itemRow(x)));
     }
@@ -279,10 +292,26 @@
     const seq = el('div', 'c-seq seq', it.seq || '–');
     const name = el('div', 'c-name'); name.append(el('div', 'nm', (it.seq ? '' : '') + (it.name || '(제품명 없음)')));
     if (it.model) name.append(el('div', 'model', it.model));
-    name.append(erpLine(it));
+    // 별칭 사전용 품목코드 줄은 평소에 숨기고 [자세히 보기]로 펼침
+    const more = state.erpOpen.has(it.id);
+    const tgl = btn(more ? '접기' : '자세히 보기', 'link more', () => { more ? state.erpOpen.delete(it.id) : state.erpOpen.add(it.id); renderDetail(); });
+    tgl.setAttribute('aria-expanded', String(more));
+    name.append(tgl);
+    if (more) name.append(erpLine(it));
     const unit = el('div', 'c-unit', it.unit || '–');
-    const qty = el('div', 'c-qty num'); qty.append(el('span', 'lbl', '수량'), document.createTextNode(fmt(it.qty)));
+    const qty = el('div', 'c-qty num'); qty.append(el('span', 'lbl', '현장수량'), document.createTextNode(fmt(it.qty)));
     if (it.unit) { const u = el('span', 'lbl', ' ' + it.unit); u.style.marginLeft = '4px'; qty.append(u); }
+    const stk = el('div', 'c-stk num'); stk.append(el('span', 'lbl', '재고'));
+    const s = state.stock, code = it.erpState === 'none' ? '' : it.erpCode;
+    if (!code) stk.append(document.createTextNode('–'));
+    else if (!s || !s.map) stk.append(document.createTextNode(s && s.error ? '–' : '…'));
+    else {
+      const v = s.map.get(code);
+      stk.append(document.createTextNode(fmt(v ? v.avail : 0)));
+      if (it.erpState === 'guess') stk.append(el('span', 'sub2 tag-guess', '추정'));
+      if (v && v.defQ) stk.append(el('span', 'sub2', `반재 ${fmt(v.defQ)}`));
+      stk.title = `${code} · 가용 ${fmt(v ? v.avail : 0)}` + (v ? '' : ' (재고현황에 없음)');
+    }
     const amt = el('div', 'c-amt num'); amt.append(el('span', 'lbl', '금액'), document.createTextNode(won(it.amount)));
     const mk = (cls, label, rate, done, left) => {
       const sub = el('span', 'sub'); sub.append(document.createTextNode(`누계 ${fmt(done)} · `), leftText(left));
@@ -295,9 +324,9 @@
     const rec = el('div', 'c-rec');
     const tg = btn(open ? '닫기' : `기록${n ? ' ' + n : ''}`, null, () => { open ? state.open.delete(it.id) : state.open.add(it.id); renderDetail(); });
     tg.setAttribute('aria-expanded', String(open));
-    if (matchMedia('(max-width: 1100px)').matches) tg.textContent = open ? '닫기' : `발주·납품 기록${n ? ' ' + n + '건' : ''} 보기·입력`;
+    if (matchMedia('(max-width: 1200px)').matches) tg.textContent = open ? '닫기' : `발주·납품 기록${n ? ' ' + n + '건' : ''} 보기·입력`;
     rec.append(tg);
-    r.append(seq, name, unit, qty, amt, ord, dlv, rec);
+    r.append(seq, name, unit, qty, stk, amt, ord, dlv, rec);
     wrap.append(r);
     if (open) {
       const recs = el('div', 'recs');
@@ -657,6 +686,64 @@
     scored.sort((a, b) => b.s - a.s).slice(0, 8).forEach((x) => add(x.it.code, x.why, 'name'));
     return out;
   }
+  /* ---------- 핸썬 재고 (재고 확인 앱이 30분마다 올리는 잠긴 재고 파일) ---------- */
+  // 재고 앱 암호는 공동 비밀번호로 로그인한 사람에게만 서버가 건네주고, 이 화면은 기기에 저장하지 않음
+  const STOCK_SOURCES = [
+    { url: 'https://api.github.com/repos/ilhun425/hanson-stock-check/contents/data/stock.json?ref=main', headers: { Accept: 'application/vnd.github.raw+json' } },
+    { url: 'https://raw.githubusercontent.com/ilhun425/hanson-stock-check/main/data/stock.json', bust: true },
+  ];
+  async function unlockStock(box, pass) {
+    const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)), subtle = crypto.subtle;
+    const base = await subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
+    const bits = new Uint8Array(await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: b64(box.salt), iterations: Number(box.iter) }, base, 512));
+    const iv = b64(box.iv), ct = b64(box.ct), mac = b64(box.mac);
+    const macKey = await subtle.importKey('raw', bits.slice(32, 64), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+    const signed = new Uint8Array(iv.length + ct.length); signed.set(iv); signed.set(ct, iv.length);
+    if (!(await subtle.verify('HMAC', macKey, mac, signed))) throw new Error('서버에 저장된 재고 앱 암호가 맞지 않습니다. 관리자가 [핸썬 관리 > 재고 확인 암호 등록]을 다시 해 주세요.');
+    const encKey = await subtle.importKey('raw', bits.slice(0, 32), { name: 'AES-CBC' }, false, ['decrypt']);
+    return subtle.decrypt({ name: 'AES-CBC', iv }, encKey, ct);
+  }
+  // 재고현황 엑셀 → 품목코드별 가용(반입재 + 상용재고)과 반재
+  function parseStock(wb) {
+    const name = wb.SheetNames.find((n) => /재고/.test(n)) || wb.SheetNames[0];
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null, raw: true });
+    const h = rows.slice(0, 10).findIndex((r) => (r || []).map(txt).includes('품목코드'));
+    if (h < 0) throw new Error('재고 파일에서 품목코드 머리글을 찾지 못했습니다.');
+    const hd = rows[h].map(txt), col = (n) => hd.indexOf(n);
+    const C = { code: col('품목코드'), inQ: col('반입재'), defQ: col('반재'), regQ: col('상용재고'), qty: col('재고수량') };
+    const num = (r, i) => (i >= 0 ? toNum(r[i]) || 0 : 0);
+    const map = new Map();
+    rows.slice(h + 1).forEach((r) => {
+      const code = txt((r || [])[C.code]);
+      if (!code || /합계/.test(code)) return;
+      const hasSplit = C.inQ >= 0 || C.regQ >= 0;
+      map.set(code, { avail: hasSplit ? num(r, C.inQ) + num(r, C.regQ) : num(r, C.qty), defQ: num(r, C.defQ) });
+    });
+    return map;
+  }
+  let stockLoading = null;
+  // 10분 안에 불러온 재고는 다시 쓰고, 그보다 오래되면 새로 불러옴
+  function ensureStock(force) {
+    if (state.stock && state.stock.map && !force && Date.now() - state.stock.at < 600000) return Promise.resolve(state.stock);
+    if (!stockLoading) stockLoading = (async () => {
+      try {
+        if (!window.XLSX) throw new Error('엑셀 읽기 도구를 아직 불러오지 못했습니다.');
+        const { pass } = await api('stockKey');
+        let box = null;
+        for (const s of STOCK_SOURCES) {
+          try { const r = await fetch(s.bust ? s.url + '?t=' + Date.now() : s.url, { cache: 'no-store', headers: s.headers || {} }); if (r.ok) { box = await r.json(); break; } } catch {}
+        }
+        if (!box) throw new Error('재고 파일을 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.');
+        const buf = await unlockStock(box, pass);
+        state.stock = { map: parseStock(XLSX.read(new Uint8Array(buf), { type: 'array' })), time: box.time || '', at: Date.now() };
+      } catch (e) {
+        state.stock = { error: e.message || '재고를 불러오지 못했습니다.', at: Date.now() };
+      } finally { stockLoading = null; }
+      return state.stock;
+    })();
+    return stockLoading;
+  }
+
   const erpText = (code) => { const it = state.cat && state.cat.byCode.get(code); return it ? it.full : ''; };
 
   async function openUpload(file) {

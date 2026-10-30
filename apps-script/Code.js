@@ -67,6 +67,11 @@ function handle(req) {
   if (scope !== 'full') fail('forbidden', '이 비밀번호로는 할 수 없는 일입니다.');
   switch (req.action) {
     case 'catalog': return { aliases: aliasList(), items: catalogItems() };
+    case 'stockKey': {
+      const k = props().getProperty('STOCK_PASS');
+      if (!k) fail('no_stock_password', '재고 앱 암호가 아직 서버에 없습니다. 관리자가 스프레드시트 메뉴 [핸썬 관리 > 재고 확인 암호 등록]을 한 번 더 해 주세요.');
+      return { pass: k };
+    }
     case 'setErp': return withLock(() => setErp(req.changes, req.addAlias));
     case 'list': return listProjects();
     case 'project': return getProject(req.id);
@@ -451,7 +456,7 @@ function onOpen() {
     .addItem('공동 비밀번호 정하기', 'setPasswordPrompt')
     .addItem('시트 준비', 'setup')
     .addSeparator()
-    .addItem('재고 확인 암호 등록 (사전 연결용)', 'setDictPasswordPrompt')
+    .addItem('재고 확인 암호 등록 (사전 연결·재고 보기용)', 'setDictPasswordPrompt')
     .addItem('별칭 사전·전체 품목 가져오기', 'importSeedMenu')
     .addToUi();
 }
@@ -482,12 +487,13 @@ function setPasswordPrompt() {
 // 재고 확인 화면의 '앱 암호'를 등록해 두면, 재고 확인이 그 암호로 별칭 사전에 자동 연결됨 (사전 읽기·추가만 가능)
 function setDictPasswordPrompt() {
   const ui = SpreadsheetApp.getUi();
-  const r = ui.prompt('재고 확인 암호 등록', '재고 확인 화면에서 쓰는 앱 암호를 입력해 주세요. 이 암호로는 별칭 사전만 읽고 더할 수 있습니다. 비워 두고 확인을 누르면 등록을 지웁니다.', ui.ButtonSet.OK_CANCEL);
+  const r = ui.prompt('재고 확인 암호 등록', '재고 확인 화면에서 쓰는 앱 암호를 입력해 주세요. 재고 확인은 이 암호로 별칭 사전에 연결하고, 프로젝트 관리는 이 암호로 핸썬 재고를 엽니다 (공동 비밀번호로 로그인한 사람만). 비워 두고 확인을 누르면 등록을 지웁니다.', ui.ButtonSet.OK_CANCEL);
   if (r.getSelectedButton() !== ui.Button.OK) return;
   const pw = r.getResponseText();
-  if (!pw) { props().deleteProperty('DICT_PASS_HASH'); props().deleteProperty('DICT_PASS_SALT'); ui.alert('재고 확인 암호 등록을 지웠습니다.'); return; }
+  if (!pw) { ['DICT_PASS_HASH', 'DICT_PASS_SALT', 'STOCK_PASS'].forEach((k) => props().deleteProperty(k)); ui.alert('재고 확인 암호 등록을 지웠습니다.'); return; }
   const salt = Utilities.getUuid();
-  props().setProperties({ DICT_PASS_SALT: salt, DICT_PASS_HASH: hashPass(pw, salt) });
+  // STOCK_PASS: 프로젝트 관리 화면이 잠긴 재고 파일을 열 때 씀 (공동 비밀번호로 로그인한 사람에게만 전달)
+  props().setProperties({ DICT_PASS_SALT: salt, DICT_PASS_HASH: hashPass(pw, salt), STOCK_PASS: pw });
   CacheService.getScriptCache().removeAll(['fails', 'lockUntil']);
   ui.alert('재고 확인 암호를 등록했습니다.');
 }

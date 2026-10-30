@@ -144,13 +144,18 @@ input::placeholder { color: var(--ink-2); opacity: .8; }
 .stat .meter .track { height: 8px; }
 
 /* 상세: 품목 표 */
-.irow { display: grid; grid-template-columns: 52px minmax(0, 1fr) 56px 76px 128px 160px 160px 92px; gap: 0 14px; padding: 12px 16px; border-top: 1px solid var(--line-2); align-items: start; }
+.irow { display: grid; grid-template-columns: 52px minmax(0, 1fr) 56px 76px 88px 128px 160px 160px 92px; gap: 0 14px; padding: 12px 16px; border-top: 1px solid var(--line-2); align-items: start; }
 .irow.head { border-top: 0; background: var(--mute-bg); font-size: 14px; font-weight: 600; color: var(--ink-2); letter-spacing: .02em; padding-block: 8px; align-items: center; }
 .irow > div { min-width: 0; }
 .nm { font-weight: 500; overflow-wrap: anywhere; }
 .model { font-family: var(--f-mono); font-size: 14.5px; color: var(--ink-2); overflow-wrap: anywhere; }
 .seq { font-family: var(--f-mono); font-size: 14.5px; color: var(--ink-2); overflow-wrap: anywhere; }
 .c-rec .btn { width: 100%; padding-inline: 6px; }
+.c-stk .sub2 { display: block; font-size: 13px; }
+.c-stk .tag-guess { color: var(--part); }
+.btn.more { padding: 0; margin-top: 2px; font-size: 14px; font-weight: 400; }
+.stockline .btn { vertical-align: baseline; }
+.stockline.bad { color: var(--part); }
 .item { border-top: 1px solid var(--line-2); }
 .item:first-of-type { border-top: 0; }
 .item > .irow { border-top: 0; }
@@ -169,13 +174,15 @@ input::placeholder { color: var(--ink-2); opacity: .8; }
 .addf input[type=date] { flex: 1 1 140px; }
 .addf input[inputmode] { flex: 0 1 84px; width: 84px; text-align: right; }
 
-@media (max-width: 1100px) {
+@media (max-width: 1200px) {
   .irow.head { display: none; }
   .irow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 12px; }
   .irow > .c-name { grid-column: 1 / -1; grid-row: 1; }
   .irow > .c-seq { display: none; }
   .irow > .c-unit { display: none; }
-  .irow > .c-qty, .irow > .c-amt { text-align: left; }
+  .irow > .c-qty, .irow > .c-stk, .irow > .c-amt { text-align: left; }
+  .irow > .c-amt { grid-column: 1 / -1; }
+  .c-stk .sub2 { display: inline; margin-left: 6px; }
   .irow > .c-rec { grid-column: 1 / -1; }
   .irow .lbl { display: inline; color: var(--ink-2); font-size: 14px; margin-right: 6px; }
 }
@@ -250,7 +257,7 @@ dialog::backdrop { background: rgba(10, 20, 30, .45); }
 <div class="wrap">
   <main id="app" aria-live="polite"></main>
   <footer class="foot">
-    <p class="note muted">주식회사 핸썬 Hanson Inc. · Version 03</p>
+    <p class="note muted">주식회사 핸썬 Hanson Inc. · Version 04</p>
     <button class="btn link" type="button" id="logout" hidden>이 기기에서 잠그기</button>
   </footer>
 </div>
