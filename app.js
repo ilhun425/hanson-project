@@ -17,7 +17,7 @@
 
   const TKEY = 'hp-token';
   const store = { get() { try { return localStorage.getItem(TKEY); } catch { return null; } }, set(v) { try { localStorage.setItem(TKEY, v); } catch {} }, del() { try { localStorage.removeItem(TKEY); } catch {} } };
-  const state = { token: store.get(), statuses: [], list: null, filter: null, q: '', sort: 'recent', detail: null, open: new Set(), erpOpen: new Set(), stock: null };
+  const state = { token: store.get(), statuses: [], list: null, filter: null, q: '', sort: 'recent', detail: null, open: new Set(), erpOpen: new Set(), stock: null, memoEdit: null };
 
   /* ---------- 서버 ---------- */
   async function api(action, data) {
@@ -77,7 +77,9 @@
     if (sub) m.append(sub);
     return m;
   }
-  function statusPill(s) { const i = state.statuses.indexOf(s); return el('span', 'pill' + (i >= 0 ? ' s' + (i % 6) : ''), s || '–'); }
+  const ST_COLOR = { 영업중: 0, 설계: 6, 견적: 1, 수주: 2, 진행중: 3, 준공: 4, 보류: 5 };
+  const stCls = (s) => { if (s in ST_COLOR) return ' s' + ST_COLOR[s]; const i = state.statuses.indexOf(s); return i >= 0 ? ' s' + (i % 7) : ''; };
+  function statusPill(s) { return el('span', 'pill' + stCls(s), s || '–'); }
 
   /* ---------- 화면 전환 ---------- */
   function route() {
@@ -153,8 +155,7 @@
       all.setAttribute('aria-pressed', String(state.filter == null)); all.onclick = () => { state.filter = null; draw(); };
       chips.append(all);
       [...counts.keys()].forEach((s) => {
-        const i = state.statuses.indexOf(s);
-        const b = el('button', 'chip' + (i >= 0 ? ' s' + (i % 6) : '')); b.type = 'button';
+        const b = el('button', 'chip' + stCls(s)); b.type = 'button';
         b.append(el('span', 'dot'), el('span', null, s), el('span', 'n', String(counts.get(s))));
         b.setAttribute('aria-pressed', String(state.filter === s));
         b.onclick = () => { state.filter = state.filter === s ? null : s; draw(); };
@@ -162,7 +163,7 @@
       });
       const kw = state.q.trim().toLowerCase();
       let rows = list.filter((p) => (state.filter == null || p.status === state.filter) &&
-        (!kw || [p.site, p.designer, p.builder, p.clientManager, p.hansonManager].join(' ').toLowerCase().includes(kw)));
+        (!kw || [p.site, p.designer, p.builder, p.designManager, p.clientManager, p.hansonManager].join(' ').toLowerCase().includes(kw)));
       const cmp = { recent: (a, b) => b.updatedAt.localeCompare(a.updatedAt),
         due: (a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999') || a.site.localeCompare(b.site, 'ko'),
         name: (a, b) => a.site.localeCompare(b.site, 'ko') }[state.sort];
@@ -188,7 +189,8 @@
     const sub = [p.designer && '설계 ' + p.designer, p.builder && '시공 ' + p.builder].filter(Boolean).join(' · ');
     if (sub) site.append(el('div', 'sub2', sub));
     const who = el('div', 'c-who sub2');
-    if (p.clientManager) who.append(el('div', null, '업체 ' + p.clientManager));
+    if (p.designManager) who.append(el('div', null, '설계 ' + p.designManager));
+    if (p.clientManager) who.append(el('div', null, '시공 ' + p.clientManager));
     if (p.hansonManager) who.append(el('div', null, '핸썬 ' + p.hansonManager));
     if (!who.childNodes.length) who.textContent = '–';
     const due = el('div', 'c-due'); due.append(el('span', 'lbl', '준공 예정'), document.createTextNode(p.dueDate || '–'));
@@ -222,8 +224,8 @@
     tools.append(edit); head.append(ttl, tools);
 
     const ov = el('dl', 'panel ov');
-    [['현 상황', p.status], ['설계사', p.designer], ['시공사', p.builder], ['업체담당자', p.clientManager], ['핸썬담당자', p.hansonManager],
-      ['준공 예정일', p.dueDate], ['총 금액', won(p.total)], ['마지막 수정', p.updatedAt]].forEach(([k, v]) => {
+    [['현 상황', p.status], ['설계사', p.designer], ['시공사', p.builder], ['설계담당자', p.designManager], ['시공담당자', p.clientManager], ['핸썬담당자', p.hansonManager],
+      ['납품 예정일', p.deliveryDate], ['준공 예정일', p.dueDate], ['총 금액', won(p.total)], ['마지막 수정', p.updatedAt]].forEach(([k, v]) => {
       const g = el('div'); g.append(el('dt', null, k), el('dd', null, v || '–')); ov.append(g);
     });
 
@@ -267,10 +269,10 @@
     const fileIn = el('input', 'file-in'); fileIn.type = 'file'; fileIn.id = 'hw-file'; fileIn.accept = '.xlsx,.xlsm,.xls,.csv';
     const upBtn = el('label', 'btn primary', '엑셀로 품목 올리기'); upBtn.htmlFor = 'hw-file';
     fileIn.onchange = () => { const f = fileIn.files[0]; fileIn.value = ''; if (f) openUpload(f); };
-    up.append(upBtn, fileIn); hwHead.append(ht, up);
+    up.append(btn('품목 직접 입력', null, () => openItem(null)), upBtn, fileIn); hwHead.append(ht, up);
 
     const tbl = el('div', 'table'); tbl.setAttribute('role', 'table'); tbl.setAttribute('aria-label', '하드웨어 품목별 발주·납품');
-    if (!c.items.length) tbl.append(el('div', 'empty', '아직 품목이 없습니다. 견적서나 스펙 엑셀을 올려 주세요.'));
+    if (!c.items.length) tbl.append(el('div', 'empty', '아직 품목이 없습니다. 견적서나 스펙 엑셀을 올리거나 [품목 직접 입력]으로 넣어 주세요.'));
     else {
       const hd = el('div', 'irow head'); hd.setAttribute('role', 'row');
       ['순번', '제품명 · 모델명', '단위', '현장수량', '재고', '금액', '발주 (누계 · 남음)', '납품 (누계 · 남음)', ''].forEach((t, k) => { const x = el('div', k >= 3 && k <= 5 ? 'num' : '', t); x.setAttribute('role', 'columnheader'); hd.append(x); });
@@ -292,18 +294,23 @@
     const seq = el('div', 'c-seq seq', it.seq || '–');
     const name = el('div', 'c-name'); name.append(el('div', 'nm', (it.seq ? '' : '') + (it.name || '(제품명 없음)')));
     if (it.model) name.append(el('div', 'model', it.model));
-    // 별칭 사전용 품목코드 줄은 평소에 숨기고 [자세히 보기]로 펼침
+    // 품목코드·재고 수기·품목 고치기는 평소에 숨기고 [자세히 보기]로 펼침
     const more = state.erpOpen.has(it.id);
     const tgl = btn(more ? '접기' : '자세히 보기', 'link more', () => { more ? state.erpOpen.delete(it.id) : state.erpOpen.add(it.id); renderDetail(); });
     tgl.setAttribute('aria-expanded', String(more));
-    name.append(tgl);
-    if (more) name.append(erpLine(it));
+    const links = el('div', 'links'); links.append(tgl);
+    if (!it.memo && state.memoEdit !== it.id) links.append(btn('적요 쓰기', 'link more', () => { state.memoEdit = it.id; renderDetail(); }));
+    name.append(links);
+    if (more) { const box = el('div', 'more-box'); box.append(erpLine(it), stockLine(it, x)); const t = el('div'); t.append(btn('품목 고치기·지우기', 'sm', () => openItem(it))); box.append(t); name.append(box); }
     const unit = el('div', 'c-unit', it.unit || '–');
     const qty = el('div', 'c-qty num'); qty.append(el('span', 'lbl', '현장수량'), document.createTextNode(fmt(it.qty)));
     if (it.unit) { const u = el('span', 'lbl', ' ' + it.unit); u.style.marginLeft = '4px'; qty.append(u); }
     const stk = el('div', 'c-stk num'); stk.append(el('span', 'lbl', '재고'));
     const s = state.stock, code = it.erpState === 'none' ? '' : it.erpCode;
-    if (!code) stk.append(document.createTextNode('–'));
+    if (hasManual(it)) {
+      stk.append(document.createTextNode(fmt(Number(it.stockManual))), el('span', 'sub2 tag-man', '수기'));
+      stk.title = '수기로 고친 재고 (' + it.stockManualAt + ')';
+    } else if (!code) stk.append(document.createTextNode('–'));
     else if (!s || !s.map) stk.append(document.createTextNode(s && s.error ? '–' : '…'));
     else {
       const v = s.map.get(code);
@@ -322,18 +329,134 @@
     const dlv = mk('c-dlv', '납품', x.deliveryRate, x.delivered, x.deliveryLeft);
     const n = x.orderList.length + x.deliveryList.length;
     const rec = el('div', 'c-rec');
-    const tg = btn(open ? '닫기' : `기록${n ? ' ' + n : ''}`, null, () => { open ? state.open.delete(it.id) : state.open.add(it.id); renderDetail(); });
+    const tg = btn(null, null, () => { open ? state.open.delete(it.id) : state.open.add(it.id); renderDetail(); });
     tg.setAttribute('aria-expanded', String(open));
-    if (matchMedia('(max-width: 1200px)').matches) tg.textContent = open ? '닫기' : `발주·납품 기록${n ? ' ' + n + '건' : ''} 보기·입력`;
+    // 표(넓은 화면)에는 짧은 글자, 카드(좁은 화면)에는 긴 글자. 창 폭이 바뀌어도 CSS가 알맞은 쪽을 보여 줌
+    if (open) tg.textContent = '닫기';
+    else tg.append(el('span', 't-wide', `기록${n ? ' ' + n : ''}`), el('span', 't-narrow', `발주·납품 기록${n ? ' ' + n + '건' : ''} 보기·입력`));
     rec.append(tg);
     r.append(seq, name, unit, qty, stk, amt, ord, dlv, rec);
     wrap.append(r);
+    if (state.memoEdit === it.id || it.memo) wrap.append(memoLine(it));
     if (open) {
       const recs = el('div', 'recs');
       recs.append(recPanel(x, 'order', '발주', x.orderList), recPanel(x, 'delivery', '납품', x.deliveryList));
       wrap.append(recs);
     }
     return wrap;
+  }
+
+  const hasManual = (it) => it.stockManual !== '' && it.stockManual != null;
+  async function patchItem(button, it, patch, msg) {
+    const j = await run(button, () => api('updateItem', { hwId: it.id, patch }));
+    if (!j) return false;
+    state.detail = j; renderDetail(); if (msg) toast(msg);
+    return true;
+  }
+
+  // 재고 수기: ERP 누락·오표기일 때 이 품목의 재고 숫자를 직접 고침. 비우면 다시 ERP 재고
+  function stockLine(it) {
+    const f = el('form', 'stockf');
+    const code = it.erpState === 'none' ? '' : it.erpCode, s = state.stock;
+    const auto = !code ? '품목코드 없음' : s && s.map ? 'ERP 재고 ' + fmt((s.map.get(code) || { avail: 0 }).avail) : 'ERP 재고 불러오는 중';
+    const lb = el('label', null, '재고 수기');
+    const inp = el('input'); inp.type = 'text'; inp.inputMode = 'decimal'; inp.value = hasManual(it) ? fmt(Number(it.stockManual)) : ''; inp.placeholder = '숫자';
+    inp.setAttribute('aria-label', '재고 수기 입력'); lb.append(inp);
+    const go = el('button', 'btn sm', '저장'); go.type = 'submit';
+    f.append(lb, go);
+    if (hasManual(it)) f.append(btn('ERP 재고로 되돌리기', 'sm', (e) => patchItem(e.currentTarget, it, { stockManual: '' }, 'ERP 재고로 되돌렸습니다.')));
+    f.append(el('span', 'muted', auto + (hasManual(it) ? ' · ' + it.stockManualAt.slice(0, 10) + ' 수기' : '')));
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      const v = inp.value.trim();
+      if (v === '') { if (hasManual(it)) patchItem(go, it, { stockManual: '' }, 'ERP 재고로 되돌렸습니다.'); return; }
+      const n = toNum(v);
+      if (n == null || n < 0) { toast('재고는 0 이상의 숫자로 입력해 주세요.'); inp.focus(); return; }
+      patchItem(go, it, { stockManual: n }, '재고를 ' + fmt(n) + '(으)로 고쳤습니다.');
+    };
+    return f;
+  }
+
+  // 품목 아래 적요 (특이사항 메모)
+  function memoLine(it) {
+    const box = el('div', 'memo');
+    if (state.memoEdit !== it.id) {
+      box.append(el('span', 'k', '적요'), el('span', 'v', it.memo), btn('수정', 'link sm', () => { state.memoEdit = it.id; renderDetail(); }));
+      return box;
+    }
+    const f = el('form', 'memof');
+    const ta = el('textarea'); ta.value = it.memo || ''; ta.maxLength = 1000; ta.rows = 2; ta.placeholder = '특이사항 (예: 색상 변경 요청, 부분 납품 일정)';
+    ta.setAttribute('aria-label', '적요');
+    const acts = el('div', 'actions');
+    const ok = el('button', 'btn primary sm', '저장'); ok.type = 'submit';
+    acts.append(ok, btn('취소', 'sm', () => { state.memoEdit = null; renderDetail(); }));
+    f.append(el('span', 'k', '적요'), ta, acts);
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const v = ta.value.trim();
+      if (v === (it.memo || '')) { state.memoEdit = null; renderDetail(); return; }
+      state.memoEdit = null;
+      if (!(await patchItem(ok, it, { memo: v }, v ? '적요를 저장했습니다.' : '적요를 지웠습니다.'))) state.memoEdit = it.id;
+    };
+    box.append(f);
+    setTimeout(() => ta.focus(), 0);
+    return box;
+  }
+
+  // 품목 직접 입력 (it 없음) 또는 고치기·지우기
+  async function openItem(it) {
+    const dlg = $('dlg'), isNew = !it;
+    const box = el('form', 'dlg'); box.noValidate = true;
+    box.append(el('h2', null, isNew ? '품목 직접 입력' : '품목 고치기'));
+    const grid = el('div', 'fields'), inp = {};
+    const field = (k, label, opt) => {
+      const lb = el('label', 'field'); const t = el('span', null, label);
+      if (!(opt && opt.req)) t.append(el('span', 'opt', ' (선택)'));
+      const i = el(opt && opt.area ? 'textarea' : 'input'); if (!(opt && opt.area)) i.type = 'text'; else i.rows = 2;
+      i.value = it ? (opt && opt.num ? (it[k] ? fmt(it[k]) : (k === 'qty' ? '0' : '')) : it[k] || '') : '';
+      if (opt && opt.num) i.inputMode = 'decimal';
+      if (opt && opt.ph) i.placeholder = opt.ph;
+      i.maxLength = (opt && opt.max) || 200; i.autocomplete = 'off';
+      lb.append(t, i); if (opt && opt.wide) lb.classList.add('wide'); grid.append(lb); inp[k] = i;
+    };
+    field('name', '제품명', { req: true, ph: '제품명이나 모델명 중 하나는 꼭' }); field('model', '모델명');
+    field('maker', '매입처'); field('seq', '순번', { max: 20 }); field('unit', '단위', { max: 20, ph: '예: EA' });
+    field('qty', '현장수량', { req: true, num: true }); field('amount', '금액 (원)', { num: true });
+    if (isNew) field('memo', '적요', { area: true, max: 1000, wide: true });
+    const err = el('p', 'err'); err.hidden = true; err.style.margin = '0';
+    const acts = el('div', 'actions');
+    const ok = el('button', 'btn primary', '확인'); ok.type = 'submit';
+    acts.append(ok, btn('취소', null, () => dlg.close()), el('span', 'grow'));
+    if (!isNew) {
+      const recN = state.detail.orders.filter((r) => r.hwId === it.id).length + state.detail.deliveries.filter((r) => r.hwId === it.id).length;
+      acts.append(btn('품목 지우기', 'danger', (e) => {
+        if (!confirm(`"${it.name || it.model}" 품목` + (recN ? `과 발주·납품 기록 ${recN}건` : '') + '을 지울까요? 되돌릴 수 없습니다.')) return;
+        run(e.currentTarget, async () => { state.detail = await api('deleteItem', { hwId: it.id }); dlg.close(); renderDetail(); toast('품목을 지웠습니다.'); });
+      }));
+    }
+    box.append(grid, err, acts);
+    box.onsubmit = async (e) => {
+      e.preventDefault();
+      const v = (k) => inp[k] ? inp[k].value.trim() : '';
+      const showErr = (m, i) => { err.textContent = m; err.hidden = false; if (i) i.focus(); };
+      if (!v('name') && !v('model')) return showErr('제품명이나 모델명을 입력해 주세요.', inp.name);
+      const q = toNum(v('qty')); if (q == null || q < 0) return showErr('현장수량을 0 이상의 숫자로 입력해 주세요.', inp.qty);
+      const a = v('amount') ? toNum(v('amount')) : 0; if (a == null) return showErr('금액은 숫자로 입력해 주세요.', inp.amount);
+      err.hidden = true;
+      const item = { name: v('name'), model: v('model'), maker: v('maker'), seq: v('seq'), unit: v('unit'), qty: q, amount: a };
+      // 품목코드: 새 품목이나 모델·제품명이 바뀐 자동 붙임(사전·추정·없음)은 다시 찾음. 사람이 확인한 것은 그대로
+      const changed = !it || ['name', 'model', 'maker'].some((k) => item[k] !== (it[k] || ''));
+      if (changed && (!it || it.erpState !== 'ok' && it.erpState !== 'none')) {
+        try { await ensureCatalog(); const m = matchErp(item); item.erpCode = m.code; item.erpState = m.state; } catch {}
+      }
+      if (isNew) item.memo = v('memo');
+      const done = await run(ok, () => isNew ? api('addItem', { projectId: state.detail.project.id, item }) : api('updateItem', { hwId: it.id, patch: item }));
+      if (!done) return;
+      state.detail = done; dlg.close(); renderDetail();
+      toast(isNew ? '품목을 더했습니다.' + (item.erpCode ? ' 품목코드 ' + item.erpCode + '(' + ERP_LABEL[item.erpState] + ')를 붙였습니다.' : '') : '품목을 고쳤습니다.');
+    };
+    dlg.replaceChildren(box); if (!dlg.open) dlg.showModal();
+    setTimeout(() => inp.name.focus(), 0);
   }
 
   // 품목 아래 ERP 품목코드 한 줄: 코드 · ERP 품목명 · 상태, 그리고 확인 버튼
@@ -460,7 +583,7 @@
 
   /* ---------- 개요 등록·수정 ---------- */
   async function viewEdit(id) {
-    let p = { status: '', site: '', designer: '', builder: '', clientManager: '', hansonManager: '', dueDate: '', total: '' };
+    let p = { status: '', site: '', designer: '', builder: '', designManager: '', clientManager: '', hansonManager: '', deliveryDate: '', dueDate: '', total: '' };
     if (id) {
       if (!state.detail || state.detail.project.id !== id) {
         app.replaceChildren(el('p', 'busy', '불러오는 중…'));
@@ -478,7 +601,7 @@
     const radios = el('div', 'radios');
     state.statuses.forEach((s, i) => {
       const lb = el('label'); const r = el('input'); r.type = 'radio'; r.name = 'status'; r.value = s; r.checked = p.status === s;
-      const ch = el('span', 'chip s' + (i % 6)); ch.append(el('span', 'dot'), document.createTextNode(s));
+      const ch = el('span', 'chip' + stCls(s)); ch.append(el('span', 'dot'), document.createTextNode(s));
       lb.append(r, ch); radios.append(lb);
     });
     if (p.status && !state.statuses.includes(p.status)) {
@@ -505,7 +628,8 @@
     const grow = (t) => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 2 + 'px'; };
     field('site', '현장명', { required: true, grow: true });
     field('designer', '설계사'); field('builder', '시공사');
-    field('clientManager', '업체담당자'); field('hansonManager', '핸썬담당자');
+    field('designManager', '설계담당자'); field('clientManager', '시공담당자'); field('hansonManager', '핸썬담당자');
+    field('deliveryDate', '납품 예정일', { type: 'date' });
     field('dueDate', '준공 예정일', { type: 'date' });
     const total = field('total', '총 금액 (원)', { mode: 'numeric', ph: '예: 12,500,000' });
     total.onblur = () => { const n = toNum(total.value); if (n != null) total.value = fmt(n); };
@@ -532,7 +656,7 @@
       if (tv && tn == null) return showErr('총 금액은 숫자로 입력해 주세요.', inputs.total);
       err.hidden = true;
       const body = { id: id || '', updatedAt: id ? p.updatedAt : '', status: chosen.value, total: tn || 0 };
-      ['site', 'designer', 'builder', 'clientManager', 'hansonManager', 'dueDate'].forEach((k) => { body[k] = inputs[k].value.trim(); });
+      ['site', 'designer', 'builder', 'designManager', 'clientManager', 'hansonManager', 'deliveryDate', 'dueDate'].forEach((k) => { body[k] = inputs[k].value.trim(); });
       run(ok, async () => {
         try {
           const j = await api('saveProject', { project: body });

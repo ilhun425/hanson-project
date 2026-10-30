@@ -27,7 +27,7 @@ img{max-width:100%}
   --paper: #f7f9fb; --panel: #ffffff; --ink: #1d2329; --ink-2: #56606b; --line: #dde3ea; --line-2: #eef2f6;
   --sky: #1f7fbf; --sky-soft: #e5f1fa; --sky-ink: #0f5a8c;
   --ok: #1d7a4a; --ok-bg: #e3f4ea; --part: #8a5a00; --part-bg: #fdf1cf; --chk: #5b4bb5; --chk-bg: #ece9fb; --ord: #b4232c; --ord-bg: #fbe5e6;
-  --mute-bg: #f0f2f5;
+  --mute-bg: #f0f2f5; --dsg: #0b6e72; --dsg-bg: #dff3f3;
   --f-body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
   --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
   --r: 8px;
@@ -36,12 +36,12 @@ img{max-width:100%}
   --paper: #12161a; --panel: #1a2026; --ink: #e6ebf0; --ink-2: #9aa6b2; --line: #2c343c; --line-2: #222a31;
   --sky: #5fb2e8; --sky-soft: #173246; --sky-ink: #9fd3f5;
   --ok: #6fd39c; --ok-bg: #173327; --part: #f2c25a; --part-bg: #3a2f12; --chk: #b3a8f5; --chk-bg: #2a2546; --ord: #f08a90; --ord-bg: #3d1c1f;
-  --mute-bg: #222a31; color-scheme: dark; } }
+  --mute-bg: #222a31; --dsg: #6fd3d6; --dsg-bg: #163536; color-scheme: dark; } }
 :root[data-theme="dark"] {
   --paper: #12161a; --panel: #1a2026; --ink: #e6ebf0; --ink-2: #9aa6b2; --line: #2c343c; --line-2: #222a31;
   --sky: #5fb2e8; --sky-soft: #173246; --sky-ink: #9fd3f5;
   --ok: #6fd39c; --ok-bg: #173327; --part: #f2c25a; --part-bg: #3a2f12; --chk: #b3a8f5; --chk-bg: #2a2546; --ord: #f08a90; --ord-bg: #3d1c1f;
-  --mute-bg: #222a31; color-scheme: dark; }
+  --mute-bg: #222a31; --dsg: #6fd3d6; --dsg-bg: #163536; color-scheme: dark; }
 
 body { background: var(--paper); color: var(--ink); font-family: var(--f-body); font-size: 16px; line-height: 1.5; }
 .wrap { max-width: 1240px; margin: 0 auto; padding-block: 28px 56px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 20px; }
@@ -94,6 +94,7 @@ input::placeholder { color: var(--ink-2); opacity: .8; }
 .find input[type=search] { flex: 1 1 220px; }
 .s0 { --c: var(--chk); --cb: var(--chk-bg); } .s1 { --c: var(--part); --cb: var(--part-bg); } .s2 { --c: var(--sky-ink); --cb: var(--sky-soft); }
 .s3 { --c: var(--ok); --cb: var(--ok-bg); } .s4 { --c: var(--ink-2); --cb: var(--mute-bg); } .s5 { --c: var(--ord); --cb: var(--ord-bg); }
+.s6 { --c: var(--dsg); --cb: var(--dsg-bg); }
 .pill { display: inline-block; white-space: nowrap; font-size: 14.5px; font-weight: 600; padding: 2px 10px; border-radius: 999px; color: var(--c, var(--ink-2)); background: var(--cb, var(--mute-bg)); }
 
 /* 진행 막대 */
@@ -151,8 +152,25 @@ input::placeholder { color: var(--ink-2); opacity: .8; }
 .model { font-family: var(--f-mono); font-size: 14.5px; color: var(--ink-2); overflow-wrap: anywhere; }
 .seq { font-family: var(--f-mono); font-size: 14.5px; color: var(--ink-2); overflow-wrap: anywhere; }
 .c-rec .btn { width: 100%; padding-inline: 6px; }
+.t-narrow { display: none; }
 .c-stk .sub2 { display: block; font-size: 13px; }
 .c-stk .tag-guess { color: var(--part); }
+.c-stk .tag-man { color: var(--chk); font-weight: 600; }
+.links { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.more-box { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; padding: 8px 10px; border-radius: 6px; background: var(--mute-bg); }
+.more-box .erp { margin-top: 0; }
+.stockf { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 14px; }
+.stockf label { display: inline-flex; gap: 6px; align-items: center; color: var(--ink-2); }
+.stockf input { font: inherit; font-size: 14px; width: 84px; padding: 3px 6px; text-align: right; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.stockf .muted { overflow-wrap: anywhere; }
+.memo { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 0 16px 12px 82px; margin-top: -4px; font-size: 15px; }
+.memo .k { flex: none; font-size: 14px; font-weight: 600; color: var(--part); }
+.memo .v { flex: 1 1 200px; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.memo .btn.link { padding: 0 2px; }
+.memof { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.memof textarea { font: inherit; font-size: 15px; line-height: 1.5; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); width: 100%; resize: vertical; }
+.field.wide { grid-column: 1 / -1; }
+.dlg .field textarea { overflow: auto; resize: vertical; }
 .btn.more { padding: 0; margin-top: 2px; font-size: 14px; font-weight: 400; }
 .stockline .btn { vertical-align: baseline; }
 .stockline.bad { color: var(--part); }
@@ -183,6 +201,8 @@ input::placeholder { color: var(--ink-2); opacity: .8; }
   .irow > .c-qty, .irow > .c-stk, .irow > .c-amt { text-align: left; }
   .irow > .c-amt { grid-column: 1 / -1; }
   .c-stk .sub2 { display: inline; margin-left: 6px; }
+  .memo { padding-left: 16px; }
+  .t-wide { display: none; } .t-narrow { display: inline; }
   .irow > .c-rec { grid-column: 1 / -1; }
   .irow .lbl { display: inline; color: var(--ink-2); font-size: 14px; margin-right: 6px; }
 }
@@ -257,7 +277,7 @@ dialog::backdrop { background: rgba(10, 20, 30, .45); }
 <div class="wrap">
   <main id="app" aria-live="polite"></main>
   <footer class="foot">
-    <p class="note muted">주식회사 핸썬 Hanson Inc. · Version 04</p>
+    <p class="note muted">주식회사 핸썬 Hanson Inc. · Version 05</p>
     <button class="btn link" type="button" id="logout" hidden>이 기기에서 잠그기</button>
   </footer>
 </div>

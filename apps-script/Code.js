@@ -3,7 +3,7 @@
  * 공동 비밀번호는 스프레드시트 메뉴 [핸썬 관리 > 공동 비밀번호 정하기]로 정하며, 해시만 Script Properties에 저장합니다. */
 
 // 현 상황 선택지. 바꾸려면 이 줄을 고치거나, 프로젝트 설정 > 스크립트 속성에 STATUSES 를 '영업중,견적,…' 처럼 넣으면 됩니다.
-const STATUSES_DEFAULT = ['영업중', '견적', '수주', '진행중', '준공', '보류'];
+const STATUSES_DEFAULT = ['영업중', '설계', '견적', '수주', '진행중', '준공', '보류'];
 
 const TOKEN_DAYS = 30;          // 로그인 유지 기간
 const MAX_FAILS = 5;            // 이 횟수만큼 틀리면
@@ -14,12 +14,13 @@ const HASH_ROUNDS = 300;
 const SHEETS = {
   project: { name: '프로젝트', cols: [
     ['id', 'id'], ['status', '현상황'], ['site', '현장명'], ['designer', '설계사'], ['builder', '시공사'],
-    ['clientManager', '업체담당자'], ['hansonManager', '핸썬담당자'], ['dueDate', '준공예정일'], ['total', '총금액', 'num'],
-    ['createdAt', '등록일시'], ['updatedAt', '수정일시']] },
+    ['clientManager', '시공담당자'], ['hansonManager', '핸썬담당자'], ['dueDate', '준공예정일'], ['total', '총금액', 'num'],
+    ['createdAt', '등록일시'], ['updatedAt', '수정일시'], ['designManager', '설계담당자'], ['deliveryDate', '납품예정일']] },
   hw: { name: '하드웨어', cols: [
     ['id', 'id'], ['projectId', '프로젝트id'], ['seq', '순번'], ['name', '제품명'], ['model', '모델명'], ['unit', '단위'],
     ['qty', '수량', 'num'], ['amount', '금액', 'num'], ['createdAt', '등록일시'],
-    ['maker', '매입처'], ['erpCode', 'ERP품목코드'], ['erpState', '품목코드상태']] },
+    ['maker', '매입처'], ['erpCode', 'ERP품목코드'], ['erpState', '품목코드상태'],
+    ['memo', '적요'], ['stockManual', '재고수기'], ['stockManualAt', '재고수기일시']] },
   order: { name: '발주', cols: [
     ['id', 'id'], ['projectId', '프로젝트id'], ['hwId', '하드웨어id'], ['date', '날짜'], ['qty', '수량', 'num'], ['createdAt', '등록일시']] },
   delivery: { name: '납품', cols: [
@@ -78,6 +79,9 @@ function handle(req) {
     case 'saveProject': return withLock(() => saveProject(req.project || {}));
     case 'deleteProject': return withLock(() => deleteProject(req.id));
     case 'uploadHardware': return withLock(() => uploadHardware(req.projectId, req.items, req.mode));
+    case 'addItem': return withLock(() => uploadHardware(req.projectId, [req.item || {}], 'append'));
+    case 'updateItem': return withLock(() => updateItem(req.hwId, req.patch || {}));
+    case 'deleteItem': return withLock(() => deleteItem(req.hwId));
     case 'addRecord': return withLock(() => addRecord(req.kind, req.hwId, req.date, req.qty));
     case 'deleteRecord': return withLock(() => deleteRecord(req.kind, req.id));
   }
@@ -208,7 +212,7 @@ function readAll(key) {
       def.cols.forEach(([k, , t], i) => {
         const v = r[i];
         if (t === 'num') o[k] = typeof v === 'number' ? v : (Number(String(v).replace(/,/g, '')) || 0);
-        else if (v instanceof Date) o[k] = Utilities.formatDate(v, tz(), k === 'dueDate' || k === 'date' ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm:ss');
+        else if (v instanceof Date) o[k] = Utilities.formatDate(v, tz(), k === 'dueDate' || k === 'deliveryDate' || k === 'date' ? 'yyyy-MM-dd' : 'yyyy-MM-dd HH:mm:ss');
         else o[k] = v == null ? '' : String(v);
       });
       return o;
@@ -281,9 +285,11 @@ function saveProject(p) {
   if (!statuses().includes(status)) fail('invalid', '현 상황을 골라 주세요.');
   const dueDate = clip(p.dueDate, 10);
   if (dueDate && !isDate(dueDate)) fail('invalid', '준공 예정일을 날짜로 입력해 주세요.');
+  const deliveryDate = clip(p.deliveryDate, 10);
+  if (deliveryDate && !isDate(deliveryDate)) fail('invalid', '납품 예정일을 날짜로 입력해 주세요.');
   const total = Number(String(p.total == null ? '' : p.total).replace(/,/g, '')) || 0;
-  const rec = { status, site, designer: clip(p.designer), builder: clip(p.builder), clientManager: clip(p.clientManager),
-    hansonManager: clip(p.hansonManager), dueDate, total, updatedAt: now() };
+  const rec = { status, site, designer: clip(p.designer), builder: clip(p.builder), designManager: clip(p.designManager), clientManager: clip(p.clientManager),
+    hansonManager: clip(p.hansonManager), deliveryDate, dueDate, total, updatedAt: now() };
   if (p.id) {
     const row = rowIndexOf('project', p.id);
     if (row < 0) fail('not_found', '프로젝트를 찾지 못했습니다. 다른 사람이 지웠을 수 있습니다.');
@@ -314,13 +320,55 @@ function uploadHardware(projectId, items, mode) {
   const t = now();
   const rows = items.map((it) => {
     const qty = Number(it.qty);
+    if (!clip(it.name) && !clip(it.model)) fail('invalid', '제품명이나 모델명을 입력해 주세요.');
     if (!isFinite(qty) || qty < 0) fail('invalid', `수량이 숫자가 아닌 품목이 있습니다: ${clip(it.name || it.model, 40)}`);
     return { id: newId(), projectId, seq: clip(it.seq, 20), name: clip(it.name), model: clip(it.model), unit: clip(it.unit, 20), qty, amount: Number(it.amount) || 0, createdAt: t,
-      maker: clip(it.maker, 60), erpCode: clip(it.erpCode, 40), erpState: ERP_STATES.includes(it.erpState) && it.erpCode ? it.erpState : '' };
+      maker: clip(it.maker, 60), erpCode: clip(it.erpCode, 40), erpState: ERP_STATES.includes(it.erpState) && it.erpCode ? it.erpState : '',
+      memo: clip(it.memo, 1000), stockManual: '', stockManualAt: '' };
   });
   if (mode === 'replace') ['order', 'delivery', 'hw'].forEach((k) => deleteWhere(k, (r) => r.projectId === projectId));
   appendRows('hw', rows);
   return getProject(projectId);
+}
+
+// 품목 하나 고치기 (수기 수정, 적요, 재고 수기). patch에 들어온 칸만 바꿈
+const ITEM_EDIT = { seq: 20, name: 200, model: 200, maker: 60, unit: 20, memo: 1000 };
+function updateItem(hwId, patch) {
+  const row = rowIndexOf('hw', hwId);
+  if (row < 0) fail('not_found', '품목을 찾지 못했습니다. 다른 사람이 품목을 지웠을 수 있습니다.');
+  const it = readAll('hw').find((h) => h.id === String(hwId));
+  Object.keys(ITEM_EDIT).forEach((k) => { if (k in patch) it[k] = clip(patch[k], ITEM_EDIT[k]); });
+  if (!it.name && !it.model) fail('invalid', '제품명이나 모델명을 입력해 주세요.');
+  ['qty', 'amount'].forEach((k) => {
+    if (!(k in patch)) return;
+    const n = Number(String(patch[k] == null ? '' : patch[k]).replace(/,/g, ''));
+    if (!isFinite(n) || n < 0) fail('invalid', k === 'qty' ? '현장수량은 0 이상의 숫자로 입력해 주세요.' : '금액은 숫자로 입력해 주세요.');
+    it[k] = n;
+  });
+  if ('erpCode' in patch || 'erpState' in patch) {
+    const st = ERP_STATES.includes(patch.erpState) ? patch.erpState : '';
+    it.erpCode = st && st !== 'none' ? clip(patch.erpCode, 40) : ''; it.erpState = st && (st === 'none' || it.erpCode) ? st : '';
+  }
+  // 재고 수기: 숫자면 저장, 빈 값이면 지우고 자동(ERP 재고)으로 되돌림
+  if ('stockManual' in patch) {
+    const v = String(patch.stockManual == null ? '' : patch.stockManual).replace(/,/g, '').trim();
+    if (v === '') { it.stockManual = ''; it.stockManualAt = ''; }
+    else {
+      const n = Number(v);
+      if (!isFinite(n) || n < 0) fail('invalid', '재고는 0 이상의 숫자로 입력해 주세요.');
+      it.stockManual = String(n); it.stockManualAt = now();
+    }
+  }
+  writeRows('hw', row, [it]);
+  return getProject(it.projectId);
+}
+
+function deleteItem(hwId) {
+  const it = readAll('hw').find((h) => h.id === String(hwId || ''));
+  if (!it) fail('not_found', '품목을 찾지 못했습니다. 이미 지워졌을 수 있습니다.');
+  ['order', 'delivery'].forEach((k) => deleteWhere(k, (r) => r.hwId === it.id));
+  deleteWhere('hw', (r) => r.id === it.id);
+  return getProject(it.projectId);
 }
 
 function addRecord(kind, hwId, date, qty) {
