@@ -61,9 +61,11 @@
     let qty = 0, ord = 0, dlv = 0;
     const items = d.items.map((it) => {
       const o = O.get(it.id) || 0, v = D.get(it.id) || 0;
+      // 재고 전환: 현장수량보다 더 발주한 몫 중 핸썬 재고로 남기기로 한 수량 (초과로 보지 않음)
+      const conv = Math.min(Math.max(0, o - it.qty), Number(it.stockConv) || 0), need = it.qty + conv;
       qty += it.qty; ord += Math.min(it.qty, o); dlv += Math.min(it.qty, v);
-      return { it, ordered: o, delivered: v, orderLeft: it.qty - o, deliveryLeft: it.qty - v,
-        orderRate: it.qty ? o / it.qty : null, deliveryRate: it.qty ? v / it.qty : null,
+      return { it, ordered: o, delivered: v, conv, orderLeft: need - o, deliveryLeft: it.qty - v,
+        orderRate: need ? o / need : null, deliveryRate: it.qty ? v / it.qty : null,
         orderList: (OL.get(it.id) || []).sort(byDate), deliveryList: (DL.get(it.id) || []).sort(byDate) };
     });
     return { items, qty, ordered: ord, delivered: dlv, orderRate: qty ? ord / qty : null, deliveryRate: qty ? dlv / qty : null };
@@ -90,6 +92,7 @@
     let m;
     if ((m = /^p\/(\w+)$/.exec(h))) return viewDetail(m[1]);
     if (h === 'new') return viewEdit(null);
+    if (h === 'kakao') return viewKakao();
     if ((m = /^edit\/(\w+)$/.exec(h))) return viewEdit(m[1]);
     return viewList();
   }
@@ -127,7 +130,9 @@
     const tools = el('div', 'tools');
     const reload = btn('새로 고침', null, () => load(reload));
     const add = el('a', 'btn primary', '새 프로젝트'); add.href = '#/new';
-    tools.append(reload, add); head.append(ttl, tools);
+    const kt = el('a', 'btn', '카톡 확인 대기'); kt.href = '#/kakao';
+    const ktN = el('span', 'badge'); ktN.hidden = true; kt.append(ktN);
+    tools.append(reload, kt, add); head.append(ttl, tools);
 
     const bar = el('div', 'bar');
     const chips = el('div', 'chips'); chips.setAttribute('role', 'group'); chips.setAttribute('aria-label', '현 상황별 보기');
@@ -148,6 +153,7 @@
       const list = state.list;
       if (!list) { tbl.hidden = true; return; }
       msg.hidden = true; tbl.hidden = false;
+      ktN.hidden = !state.ktWaiting; ktN.textContent = fmt(state.ktWaiting);
       const counts = new Map(state.statuses.map((s) => [s, 0]));
       list.forEach((p) => counts.set(p.status, (counts.get(p.status) || 0) + 1));
       chips.replaceChildren();
@@ -163,7 +169,7 @@
       });
       const kw = state.q.trim().toLowerCase();
       let rows = list.filter((p) => (state.filter == null || p.status === state.filter) &&
-        (!kw || [p.site, p.designer, p.builder, p.designManager, p.clientManager, p.hansonManager].join(' ').toLowerCase().includes(kw)));
+        (!kw || [p.site, p.siteAlias, p.designer, p.builder, p.designManager, p.clientManager, p.hansonManager].join(' ').toLowerCase().includes(kw)));
       const cmp = { recent: (a, b) => b.updatedAt.localeCompare(a.updatedAt),
         due: (a, b) => (a.dueDate || '9999').localeCompare(b.dueDate || '9999') || a.site.localeCompare(b.site, 'ko'),
         name: (a, b) => a.site.localeCompare(b.site, 'ko') }[state.sort];
@@ -175,7 +181,7 @@
       rows.forEach((p) => tbl.append(listRow(p)));
     }
     async function load(b) {
-      await run(b, async () => { const j = await api('list'); state.list = j.projects; draw(); });
+      await run(b, async () => { const j = await api('list'); state.list = j.projects; state.ktWaiting = j.kakaoWaiting || 0; draw(); });
       if (!state.list) { msg.className = 'err'; msg.textContent = '목록을 불러오지 못했습니다. [새로 고침]을 눌러 주세요.'; }
     }
     if (state.list) draw();
@@ -219,6 +225,7 @@
 
     const head = el('header', 'top');
     const ttl = el('div'); const h1 = el('h1', null, p.site + ' '); h1.append(statusPill(p.status)); ttl.append(h1);
+    if (p.siteAlias) ttl.append(el('p', 'lede', '현장 별칭: ' + p.siteAlias));
     const tools = el('div', 'tools');
     const edit = el('a', 'btn', '개요 수정'); edit.href = '#/edit/' + p.id;
     tools.append(edit); head.append(ttl, tools);
@@ -320,12 +327,14 @@
       stk.title = `${code} · 가용 ${fmt(v ? v.avail : 0)}` + (v ? '' : ' (재고현황에 없음)');
     }
     const amt = el('div', 'c-amt num'); amt.append(el('span', 'lbl', '금액'), document.createTextNode(won(it.amount)));
-    const mk = (cls, label, rate, done, left) => {
-      const sub = el('span', 'sub'); sub.append(document.createTextNode(`누계 ${fmt(done)} · `), leftText(left));
+    const mk = (cls, label, rate, done, left, conv) => {
+      const sub = el('span', 'sub'); sub.append(document.createTextNode(`누계 ${fmt(done)} · `));
+      if (conv) { sub.append(el('span', 'conv', `재고 전환 ${fmt(conv)}`)); if (left) sub.append(document.createTextNode(' · '), leftText(left)); }
+      else sub.append(leftText(left));
       const m = meter(rate, sub); m.querySelector('.pct').prepend(el('span', 'lbl', label));
       const cell = el('div', cls); cell.append(m); return cell;
     };
-    const ord = mk('c-ord', '발주', x.orderRate, x.ordered, x.orderLeft);
+    const ord = mk('c-ord', '발주', x.orderRate, x.ordered, x.orderLeft, x.conv);
     const dlv = mk('c-dlv', '납품', x.deliveryRate, x.delivered, x.deliveryLeft);
     const n = x.orderList.length + x.deliveryList.length;
     const rec = el('div', 'c-rec');
@@ -422,6 +431,7 @@
     field('name', '제품명', { req: true, ph: '제품명이나 모델명 중 하나는 꼭' }); field('model', '모델명');
     field('maker', '매입처'); field('seq', '순번', { max: 20 }); field('unit', '단위', { max: 20, ph: '예: EA' });
     field('qty', '현장수량', { req: true, num: true }); field('amount', '금액 (원)', { num: true });
+    field('stockConv', '재고 전환 수량', { num: true, ph: '현장수량보다 더 발주해 핸썬 재고로 남길 수량' });
     if (isNew) field('memo', '적요', { area: true, max: 1000, wide: true });
     const err = el('p', 'err'); err.hidden = true; err.style.margin = '0';
     const acts = el('div', 'actions');
@@ -442,8 +452,9 @@
       if (!v('name') && !v('model')) return showErr('제품명이나 모델명을 입력해 주세요.', inp.name);
       const q = toNum(v('qty')); if (q == null || q < 0) return showErr('현장수량을 0 이상의 숫자로 입력해 주세요.', inp.qty);
       const a = v('amount') ? toNum(v('amount')) : 0; if (a == null) return showErr('금액은 숫자로 입력해 주세요.', inp.amount);
+      const sc = v('stockConv') ? toNum(v('stockConv')) : 0; if (sc == null || sc < 0) return showErr('재고 전환 수량은 0 이상의 숫자로 입력해 주세요.', inp.stockConv);
       err.hidden = true;
-      const item = { name: v('name'), model: v('model'), maker: v('maker'), seq: v('seq'), unit: v('unit'), qty: q, amount: a };
+      const item = { name: v('name'), model: v('model'), maker: v('maker'), seq: v('seq'), unit: v('unit'), qty: q, amount: a, stockConv: sc };
       // 품목코드: 새 품목이나 모델·제품명이 바뀐 자동 붙임(사전·추정·없음)은 다시 찾음. 사람이 확인한 것은 그대로
       const changed = !it || ['name', 'model', 'maker'].some((k) => item[k] !== (it[k] || ''));
       if (changed && (!it || it.erpState !== 'ok' && it.erpState !== 'none')) {
@@ -552,7 +563,10 @@
     else {
       const ul = el('ul');
       list.forEach((r) => {
-        const li = el('li'); li.append(el('span', 'd', r.date), el('span', 'q', fmt(r.qty) + (it.unit ? ' ' + it.unit : '')));
+        const li = el('li'); const d = el('span', 'd', r.date);
+        if (r.fromStock) d.append(el('span', 'tag t-stock', '재고에서'));
+        if (r.source) { const t = el('span', 'tag', /^카톡/.test(r.source) ? '카톡 · ' + r.source.split(' ').pop() : r.source); t.title = r.source; d.append(t); }
+        li.append(d, el('span', 'q', fmt(r.qty) + (it.unit ? ' ' + it.unit : '')));
         li.append(btn('삭제', 'danger', (e) => {
           if (!confirm(`${r.date} ${word} ${fmt(r.qty)}${it.unit ? ' ' + it.unit : ''} 기록을 지울까요?`)) return;
           run(e.currentTarget, async () => { state.detail = await api('deleteRecord', { kind, id: r.id }); renderDetail(); toast(`${word} 기록을 지웠습니다.`); });
@@ -583,7 +597,7 @@
 
   /* ---------- 개요 등록·수정 ---------- */
   async function viewEdit(id) {
-    let p = { status: '', site: '', designer: '', builder: '', designManager: '', clientManager: '', hansonManager: '', deliveryDate: '', dueDate: '', total: '' };
+    let p = { status: '', site: '', designer: '', builder: '', designManager: '', clientManager: '', hansonManager: '', deliveryDate: '', dueDate: '', total: '', siteAlias: '' };
     if (id) {
       if (!state.detail || state.detail.project.id !== id) {
         app.replaceChildren(el('p', 'busy', '불러오는 중…'));
@@ -633,6 +647,7 @@
     field('dueDate', '준공 예정일', { type: 'date' });
     const total = field('total', '총 금액 (원)', { mode: 'numeric', ph: '예: 12,500,000' });
     total.onblur = () => { const n = toNum(total.value); if (n != null) total.value = fmt(n); };
+    const al = field('siteAlias', '현장 별칭', { ph: '카톡 등에서 부르는 다른 이름 (쉼표로 구분)' }); al.maxLength = 500; al.parentNode.classList.add('wide');
 
     const err = el('p', 'err'); err.hidden = true; err.style.margin = '0';
     const acts = el('div', 'actions');
@@ -656,7 +671,7 @@
       if (tv && tn == null) return showErr('총 금액은 숫자로 입력해 주세요.', inputs.total);
       err.hidden = true;
       const body = { id: id || '', updatedAt: id ? p.updatedAt : '', status: chosen.value, total: tn || 0 };
-      ['site', 'designer', 'builder', 'designManager', 'clientManager', 'hansonManager', 'deliveryDate', 'dueDate'].forEach((k) => { body[k] = inputs[k].value.trim(); });
+      ['site', 'designer', 'builder', 'designManager', 'clientManager', 'hansonManager', 'deliveryDate', 'dueDate', 'siteAlias'].forEach((k) => { body[k] = inputs[k].value.trim(); });
       run(ok, async () => {
         try {
           const j = await api('saveProject', { project: body });
@@ -949,11 +964,443 @@
     draw();
   }
 
+  /* ---------- 카톡 발주 내역 가져오기 ---------- */
+  // 카톡 PC '대화 내보내기' txt → [{date, time, sender, text}]. 사진·파일·이모티콘처럼 글이 없는 메시지는 빼고, 전화번호·계좌번호는 지움
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const KT_SKIP = /^(사진( \d+장)?|동영상|이모티콘|음성메시지|삭제된 메시지입니다\.|메시지가 삭제되었습니다\.|(파일|연락처|지도|보이스톡|페이스톡|라이브톡|샵검색)\s*:.*|예약완료\s*:\s*[\d\-\s]+|송금.*|.*(송금|이체)했습니다\.?|https?:\/\/\S+)$/;
+  const KT_SYS = /^(.+님이 .+(초대했습니다|나갔습니다|들어왔습니다|내보냈습니다)\.?|메시지가 삭제되었습니다\.|삭제된 메시지입니다\.)$/;
+  const maskKakao = (s) => s
+    .replace(/(?<![\w.])0\d{1,2}[-. )]\s?\d{3,4}[-. ]\d{4}(?![\w.])/g, '[전화번호]')
+    .replace(/(?<!\d)01[016789]\d{7,8}(?!\d)/g, '[전화번호]')
+    .replace(/(?<![\w.])\d{2,6}(?:[- ]\d{2,8}){2,4}(?![\w.])/g, (x) => (x.replace(/\D/g, '').length >= 10 ? '[번호]' : x))
+    .replace(/(비밀번호|비번|패스워드)(\s*[:：]?\s*)\S+/g, '$1$2[지움]');
+  function parseKakao(raw) {
+    const out = []; let date = '', cur = null;
+    const reDay = /^-{3,}\s*(\d{4})년 (\d{1,2})월 (\d{1,2})일.*-{3,}\s*$/;
+    const reMsg = /^\[(.+?)\] \[(오전|오후) (\d{1,2}):(\d{2})\] ?(.*)$/;
+    // 휴대폰에서 내보낸 형식: "2026. 9. 15. 오전 10:05, 이름 : 내용"
+    const reMob = /^(\d{4})\. (\d{1,2})\. (\d{1,2})\.? (오전|오후) (\d{1,2}):(\d{2}), (.+?) : (.*)$/;
+    const hour = (ap, h) => pad2((+h % 12) + (ap === '오후' ? 12 : 0));
+    for (const l of raw.replace(/^﻿/, '').split(/\r?\n/)) {
+      let m;
+      if ((m = reDay.exec(l))) { date = `${m[1]}-${pad2(m[2])}-${pad2(m[3])}`; cur = null; continue; }
+      if (date && (m = reMsg.exec(l))) { cur = { date, time: hour(m[2], m[3]) + ':' + m[4], sender: m[1].trim(), text: m[5] }; out.push(cur); continue; }
+      if ((m = reMob.exec(l))) { cur = { date: `${m[1]}-${pad2(m[2])}-${pad2(m[3])}`, time: hour(m[4], m[5]) + ':' + m[6], sender: m[7].trim(), text: m[8] }; out.push(cur); continue; }
+      if (cur && !KT_SYS.test(l.trim())) cur.text += '\n' + l;
+    }
+    return out.filter((x) => (x.text = x.text.trim()) && !KT_SKIP.test(x.text)).map((x) => Object.assign(x, { text: maskKakao(x.text) }));
+  }
+
+  const KT_KIND = { 발주: 's5', 재고출고: 's6', 납품: 's3', 신규프로젝트: 's2' };
+  const siteKey = (s) => txt(s).replace(/[\s()\[\]·,.\-]/g, '').toUpperCase();
+  const aliasesOf = (p) => String(p.siteAlias || '').split(',').map((a) => a.trim()).filter(Boolean);
+
+  // 카톡 현장명 → 프로젝트 후보 (Claude가 고른 것, 현장명·별칭 일치, 일부 일치)
+  function ktProjects(k) {
+    const K = state.kt.data, key = siteKey(k.site), out = [];
+    // 숫자를 뺀 이름("라브르27" → "라브르")과, 흔한 말이 아닌 3글자 이상 조각도 비교
+    const bare = key.replace(/\d+/g, ''), GENERIC = /^(현장|주택|단독주택|기숙사|사옥|오피스|빌딩|센터|병원|호텔|리테일|신축|공사)$/;
+    const parts = txt(k.site).split(/[\s,·()\/]+/).map(siteKey).filter((w) => w.length >= 3 && !GENERIC.test(w));
+    K.projects.forEach((p) => {
+      const names = [p.site, ...aliasesOf(p)].map(siteKey).filter((n) => n.length >= 2);
+      let s = p.id === k.projectId ? 3 : 0;
+      if (key && names.includes(key)) s = 4;
+      else if (key.length >= 2 && names.some((n) => n.includes(key) || key.includes(n))) s = Math.max(s, 2);
+      else if (bare.length >= 2 && names.some((n) => n.includes(bare))) s = Math.max(s, 2);
+      else if (parts.some((w) => names.some((n) => n.includes(w)))) s = Math.max(s, 1);
+      if (s) out.push({ p, s });
+    });
+    return out.sort((a, b) => b.s - a.s);
+  }
+
+  // 카톡 품목 → 그 프로젝트의 하드웨어 품목 후보. 별칭 사전 → 기호 무시 모델 비교 → 헤펠레 끝자리 → 제품명
+  function ktItems(k, projectId) {
+    const K = state.kt.data, hw = K.hw.filter((h) => h.projectId === projectId);
+    const raw = [k.model, ...String(k.aka || '').split('|')].map(txt).filter(Boolean);
+    const keys = [...new Set(raw.flatMap((r) => [r, ...r.split(/[\s\/,+()]+/)]).map(normM).filter((x) => x.length >= 3 && /\d/.test(x)))];
+    const haf = keys.find((x) => /^\d{8}$/.test(x));
+    const tail = (/(?:^|[\s.])\.(\d{3})(?!\d)/.exec(k.model + ' ' + k.name) || [])[1];
+    const codes = new Set();
+    if (state.cat) raw.forEach((m) => { const r = matchErp({ model: m, name: k.name }); if (r.state === 'dict') codes.add(r.code); });
+    const words = txt(k.name).split(/\s+/).map(normM).filter((w) => w.length >= 2);
+    const out = [];
+    hw.forEach((h) => {
+      const hm = normM(h.model), hn = normM(h.name), h8 = hm.match(/\d{8}/g) || [];
+      if (haf && h8.length && !h8.includes(haf)) return; // 헤펠레 8자리 코드는 숫자 하나만 달라도 다른 제품
+      let s = 0, why = '';
+      if (h.erpCode && codes.has(h.erpCode)) { s = 5; why = '별칭 사전'; }
+      else if (hm && keys.some((x) => hm === x || (x.length >= 4 && hm.includes(x)) || (hm.length >= 4 && x.includes(hm)))) { s = 4; why = '모델 일치'; }
+      else if (tail && h8.some((c) => c.endsWith(tail)) && (!catOf(k.name) || catOf(k.name) === catOf(h.name + ' ' + h.model))) { s = 2; why = '코드 끝자리 일치'; }
+      else if (words.length && words.some((w) => hn.includes(w) || hm.includes(w))) { s = 1; why = '제품명 비슷함'; }
+      if (s) out.push({ h, s, why });
+    });
+    return out.sort((a, b) => b.s - a.s);
+  }
+
+  // 카톡 모델명과 고른 품목 모델명이 다르면 알려 줌 (예: 실린더 길이 67 / 80)
+  function ktModelDiff(k, h) {
+    const km = normM(k.model);
+    if (!h || !km || !/\d/.test(km)) return '';
+    const hm = normM(h.model), ak = String(k.aka || '').split('|').map(normM);
+    return hm && !hm.includes(km) && !km.includes(hm) && !ak.some((a) => a && (hm.includes(a) || a.includes(hm))) ? h.model : '';
+  }
+
+  // 한 건의 기본 선택값 (사람이 고치면 state.kt.edit에 남음)
+  function ktPick(k) {
+    if (state.kt.edit.has(k.id)) return state.kt.edit.get(k.id);
+    const pc = ktProjects(k), projectId = pc.length && (pc[0].s >= 3 || pc.length === 1) ? pc[0].p.id : '';
+    const ic = projectId ? ktItems(k, projectId) : [];
+    const hwId = ic.length && (ic[0].s >= 4 || (ic.length === 1 && ic[0].s >= 2)) ? ic[0].h.id : '';
+    return { projectId, hwId, recKind: k.kind === '발주' ? 'order' : 'delivery', fromStock: k.fromStock === 'Y', date: k.date, qty: k.qty, manual: false };
+  }
+
+  async function viewKakao() {
+    state.kt = state.kt || { data: null, filter: '대기', edit: new Map(), editing: new Set(), parsing: false, note: '' };
+    const back = el('a', 'btn link back', '← 프로젝트 목록'); back.href = '#/';
+    if (state.kt.data) renderKakao();
+    else app.replaceChildren(back, el('p', 'busy', '불러오는 중…'));
+    ensureCatalog().catch(() => {});
+    try { state.kt.data = await api('kakaoList'); } catch (e) { if (e.code !== 'auth' && location.hash === '#/kakao') app.replaceChildren(back, el('p', 'err', e.message)); return; }
+    if (location.hash === '#/kakao') renderKakao();
+  }
+
+  function renderKakao() {
+    const K = state.kt.data, S = state.kt;
+    const back = el('a', 'btn link back', '← 프로젝트 목록'); back.href = '#/';
+    const head = el('header', 'top');
+    const ttl = el('div'); ttl.append(el('h1', null, '카톡 확인 대기'), el('p', 'lede', '단체카톡방 대화를 올리면 발주·재고출고·납품·신규 프로젝트를 찾아 여기에 모읍니다. [맞음]을 누른 것만 프로젝트에 기록됩니다.'));
+    const tools = el('div', 'tools');
+    const fileIn = el('input', 'file-in'); fileIn.type = 'file'; fileIn.id = 'kt-file'; fileIn.accept = '.txt,text/plain';
+    const upBtn = el('label', 'btn primary', '카톡 대화 파일 올리기'); upBtn.htmlFor = 'kt-file';
+    fileIn.onchange = () => { const f = fileIn.files[0]; fileIn.value = ''; if (f) ktUpload(f); };
+    tools.append(upBtn, fileIn); head.append(ttl, tools);
+
+    // 메시지 해석 상황
+    const c = K.counts || {};
+    const status = el('div', 'panel ktstat');
+    const sline = el('p', S.parsing ? 'busy' : 'note');
+    if (S.parsing) sline.textContent = S.note || '해석하는 중…';
+    else {
+      const parts = [`올린 메시지 ${fmt(Object.values(c).reduce((a, b) => a + b, 0))}개`, `해석함 ${fmt(c['해석함'] || 0)}`, `발주·출고와 관계없어 보여 건너뜀 ${fmt(c['해석 안 함'] || 0)}`];
+      if (c['대기']) parts.push(`해석 전 ${fmt(c['대기'])}`);
+      if (c['실패']) parts.push(`해석 못 함 ${fmt(c['실패'])}`);
+      sline.textContent = (S.note ? S.note + ' ' : '') + parts.join(' · ');
+    }
+    status.append(sline);
+    const sa = el('div', 'actions');
+    if (!S.parsing && (c['대기'] || c['해석중'])) sa.append(btn(`해석 이어 하기 (${fmt((c['대기'] || 0) + (c['해석중'] || 0))}개)`, 'primary sm', () => ktParseAll()));
+    if (!S.parsing && c['실패']) sa.append(btn('해석 못 한 메시지 다시 해석', 'sm', (e) => run(e.currentTarget, async () => { await api('kakaoRetry'); ktParseAll(); })));
+    if (sa.childNodes.length) status.append(sa);
+    status.append(el('p', 'note', '카톡 PC에서 대화방 메뉴 [대화 내용 > 대화 내보내기]로 저장한 txt 파일을 올려 주세요. 같은 메시지는 다시 올려도 한 번만 들어갑니다. 전화번호·계좌번호는 올리기 전에 지웁니다.'));
+
+    // 상태별 보기
+    const cnt = (st) => K.items.filter((k) => k.status === st).length;
+    const chips = el('div', 'chips');
+    [['대기', '확인 대기'], ['확인', '기록함'], ['건너뜀', '건너뜀'], ['정정됨', '정정됨']].forEach(([st, label]) => {
+      const b = el('button', 'chip'); b.type = 'button'; b.append(el('span', null, label), el('span', 'n', String(cnt(st))));
+      b.setAttribute('aria-pressed', String(S.filter === st)); b.onclick = () => { S.filter = st; renderKakao(); };
+      chips.append(b);
+    });
+
+    // 메시지별로 묶어서 (원문 한 번, 그 아래 건들)
+    const list = el('div', 'ktlist');
+    const rows = K.items.filter((k) => k.status === S.filter);
+    const groups = new Map();
+    rows.forEach((k) => { (groups.get(k.msgId) || groups.set(k.msgId, []).get(k.msgId)).push(k); });
+    const when = (id) => { const m = K.msgs[id] || {}; return (m.date || '') + (m.time || ''); };
+    const order = [...groups.keys()].sort((a, b) => (S.filter === '대기' ? when(a).localeCompare(when(b)) : when(b).localeCompare(when(a))));
+    if (!order.length) list.append(el('p', 'panel empty', S.filter === '대기' ? (K.items.length ? '확인할 건이 없습니다.' : '아직 카톡에서 찾은 건이 없습니다. [카톡 대화 파일 올리기]로 시작해 주세요.') : '없습니다.'));
+    order.slice(0, 150).forEach((mid) => list.append(ktGroup(mid, groups.get(mid))));
+    if (order.length > 150) list.append(el('p', 'note', `메시지 ${fmt(order.length)}개 중 150개만 보입니다. 앞의 건을 처리하면 다음 건이 보입니다.`));
+    app.replaceChildren(back, head, status, chips, list);
+  }
+
+  function ktGroup(mid, ks) {
+    const m = state.kt.data.msgs[mid] || {};
+    const g = el('section', 'panel ktg');
+    const h = el('div', 'ktmeta'); h.append(el('span', 'mono', `${m.date || ''} ${m.time || ''}`), el('span', null, m.sender || ''));
+    const src = el('div', 'ktsrc', m.text || '(원문 없음)');
+    g.append(h, src);
+    ks.forEach((k) => g.append(ktCard(k)));
+    return g;
+  }
+
+  function ktCard(k) {
+    const K = state.kt.data, S = state.kt, done = k.status !== '대기';
+    const card = el('div', 'ktc');
+    const top = el('div', 'kttop');
+    top.append(el('span', 'pill ' + (KT_KIND[k.kind] || ''), k.kind === '신규프로젝트' ? '신규 프로젝트' : k.kind));
+    if (k.fromStock === 'Y' && k.kind !== '재고출고') top.append(el('span', 'tag t-stock', '재고에서'));
+    if (k.purpose) top.append(el('span', 'tag', k.purpose));
+    if (k.corrects) top.append(el('span', 'tag t-fix', '정정'));
+    if (k.dest === '사무실·창고') top.append(el('span', 'tag t-warn', '사무실·창고로'));
+    if (k.kind !== '신규프로젝트') top.append(el('span', 'ktq', [k.date, k.qty !== '' ? fmt(k.qty) + (k.unit ? ' ' + k.unit : '') : '수량 모름'].join(' · ')));
+    card.append(top);
+    if (k.kind === '신규프로젝트') { ktNewCard(card, k, done); return card; }
+
+    const what = el('div', 'ktwhat');
+    what.append(el('span', 'k', '카톡'), el('span', null, [k.name, k.model].filter(Boolean).join(' ') || '(품목 없음)'));
+    if (k.supplier) what.append(el('span', 'muted', ' · 매입처 ' + k.supplier));
+    if (k.site) what.append(el('span', 'muted', ' · 현장 ' + k.site));
+    card.append(what);
+    if (k.note) card.append(el('p', 'ktnote', k.note));
+
+    if (done) {
+      const p = K.projects.find((x) => x.id === k.projectId), h = K.hw.find((x) => x.id === k.hwId);
+      const line = el('p', 'note');
+      line.textContent = k.status === '확인' ? (k.recId && h ? `${p ? p.site : ''} · ${h.name || h.model} 에 ${k.recKind === 'order' ? '발주' : '납품'}로 기록함` : '기록함 (이미 있던 기록과 같음)') + (k.doneAt ? ' · ' + k.doneAt.slice(0, 16) : '')
+        : k.status === '정정됨' ? '뒤 메시지에서 고친 내용이 따로 올라와, 이 건은 기록하지 않습니다.' : '건너뜀' + (k.doneAt ? ' · ' + k.doneAt.slice(0, 16) : '');
+      card.append(line);
+      if (k.status === '건너뜀') { const a = el('div', 'actions'); a.append(btn('되돌리기', 'sm', (e) => ktDo(e.currentTarget, k, 'reopen'))); card.append(a); }
+      return card;
+    }
+
+    const pk = ktPick(k), editing = S.editing.has(k.id);
+    const pc = ktProjects(k), p = K.projects.find((x) => x.id === pk.projectId);
+    const h = p && K.hw.find((x) => x.id === pk.hwId && x.projectId === p.id);
+    const ic = p ? ktItems(k, p.id) : [];
+
+    const to = el('dl', 'ktto');
+    const row = (label, node) => { const d = el('div'); d.append(el('dt', null, label), node); to.append(d); };
+    const recWord = pk.recKind === 'order' ? '발주' : '납품' + (pk.fromStock ? ' (재고에서)' : '');
+    if (!editing) {
+      row('프로젝트', el('dd', p ? null : 'miss', p ? p.site + (pc[0] && pc[0].p.id === p.id && pc[0].s < 4 ? ' (추정)' : '') : '맞는 프로젝트 없음'));
+      row('품목', el('dd', h ? null : 'miss', h ? [h.seq && h.seq + '.', h.name, h.model].filter(Boolean).join(' ') + (ic[0] && ic[0].h.id === h.id ? ' · ' + ic[0].why : '') : p ? '맞는 품목 없음' : '–'));
+      row('기록', el('dd', null, `${recWord} · ${pk.date} · ${pk.qty !== '' && pk.qty != null ? fmt(pk.qty) + (k.unit ? ' ' + k.unit : '') : '수량 없음'}`));
+      card.append(to);
+    } else card.append(ktEditForm(k, pk, pc, ic));
+
+    // 경고: 모델 다름, 현장이 아닌 곳, 이미 있는 기록
+    const diff = ktModelDiff(k, h);
+    if (diff) card.append(el('p', 'ktwarn', `모델명이 다릅니다: 카톡 ${k.model} / 품목 ${diff}. 같은 제품이 맞는지 확인해 주세요.`));
+    if (k.dest === '사무실·창고' && pk.recKind === 'delivery') card.append(el('p', 'ktwarn', '현장이 아니라 사무실·창고로 간 것 같습니다. 현장 납품이 아니면 [건너뛰기]를 눌러 주세요.'));
+    const same = h ? K.records.filter((r) => r.hwId === h.id && r.kind === pk.recKind && r.kakaoId !== k.id) : [];
+    if (same.length) {
+      const cmp = el('div', 'ktcmp');
+      cmp.append(el('p', 'k', `이 품목에 이미 있는 ${pk.recKind === 'order' ? '발주' : '납품'} 기록 (덮어쓰지 않습니다)`));
+      const ul = el('ul');
+      same.sort(byDate).forEach((r) => {
+        const li = el('li');
+        const differs = r.date !== pk.date || Number(r.qty) !== Number(pk.qty);
+        li.append(el('span', 'mono', r.date), el('span', 'q', fmt(r.qty)), el('span', 'muted', r.source || '직접 입력'));
+        if (differs) li.append(el('span', 'tag t-warn', '카톡과 다름'));
+        li.append(btn('이 기록과 같은 건', 'sm', (e) => ktDo(e.currentTarget, k, 'same', { recId: r.id })));
+        ul.append(li);
+      });
+      cmp.append(ul, el('p', 'note', `카톡: ${pk.date} · ${fmt(pk.qty)}. 같은 일을 적은 것이면 [이 기록과 같은 건]을, 따로 일어난 일이면 [맞음]을 눌러 새로 기록해 주세요.`));
+      card.append(cmp);
+    }
+
+    // 별칭: 현장명, 품목 모델명
+    const ticks = el('div', 'ktticks');
+    const newSite = p && k.site && ![p.site, ...aliasesOf(p)].some((n) => siteKey(n) === siteKey(k.site));
+    let remember = null, toDict = null;
+    if (newSite) { remember = el('input'); remember.type = 'checkbox'; remember.checked = true; const lb = el('label', 'tick'); lb.append(remember, el('span', null, `"${k.site}"을(를) 이 프로젝트의 현장 별칭으로 기억`)); ticks.append(lb); }
+    const dictOk = h && h.erpCode && h.erpState !== 'none' && /\d/.test(k.model) && normM(k.model) !== normM(h.model) && !(state.cat && (state.cat.alias.get(normM(k.model)) || []).some((a) => a.code === h.erpCode));
+    if (dictOk) { toDict = el('input'); toDict.type = 'checkbox'; toDict.checked = !diff; const lb = el('label', 'tick'); lb.append(toDict, el('span', null, `"${k.model}"을(를) 별칭 사전에 더하기 (품목코드 ${h.erpCode})`)); ticks.append(lb); }
+    if (ticks.childNodes.length) card.append(ticks);
+
+    const acts = el('div', 'actions');
+    const ready = p && h && pk.date && Number(pk.qty) > 0;
+    const ok = btn('맞음', 'primary sm', (e) => {
+      if (!ready) { toast(!p ? '프로젝트를 골라 주세요.' : !h ? '품목을 골라 주세요.' : '날짜와 수량을 넣어 주세요.'); if (!editing) { S.editing.add(k.id); renderKakao(); } return; }
+      ktDo(e.currentTarget, k, 'confirm', { projectId: p.id, hwId: h.id, recKind: pk.recKind, fromStock: pk.fromStock, date: pk.date, qty: Number(pk.qty),
+        remember: !!(remember && remember.checked), dictPair: toDict && toDict.checked ? { code: h.erpCode, alias: k.model } : null });
+    });
+    acts.append(ok);
+    if (!editing) acts.append(btn('고치기', 'sm', () => { S.edit.set(k.id, Object.assign({}, pk)); S.editing.add(k.id); renderKakao(); }));
+    else acts.append(btn('고치기 닫기', 'sm', () => { S.editing.delete(k.id); renderKakao(); }));
+    acts.append(btn('건너뛰기', 'sm', (e) => ktDo(e.currentTarget, k, 'skip')));
+    if (!p) acts.append(btn('새 프로젝트로 등록', 'sm', () => ktNewProject(k)));
+    else if (!h) acts.append(btn('품목으로 추가', 'sm', () => ktNewItem(k, p)));
+    card.append(acts);
+    return card;
+  }
+
+  // [고치기]: 프로젝트·품목·기록 종류·날짜·수량
+  function ktEditForm(k, pk, pc, ic) {
+    const K = state.kt.data, S = state.kt;
+    const f = el('div', 'ktedit');
+    const set = (patch) => { S.edit.set(k.id, Object.assign({}, pk, patch, { manual: true })); renderKakao(); };
+    const lab = (t, node) => { const l = el('label', 'field'); l.append(el('span', null, t), node); f.append(l); return l; };
+    const ps = el('select'); ps.append(new Option('프로젝트 고르기', ''));
+    const near = new Set(pc.map((x) => x.p.id));
+    pc.forEach((x) => ps.append(new Option(x.p.site + ' (현장명 비슷함)', x.p.id)));
+    K.projects.filter((x) => !near.has(x.id)).sort((a, b) => a.site.localeCompare(b.site, 'ko')).forEach((x) => ps.append(new Option(x.site, x.id)));
+    ps.value = pk.projectId || ''; ps.onchange = () => set({ projectId: ps.value, hwId: '' });
+    lab('프로젝트', ps);
+    const hs = el('select'); hs.append(new Option(pk.projectId ? '품목 고르기' : '먼저 프로젝트를 고르세요', ''));
+    if (pk.projectId) {
+      const top = new Set(ic.map((x) => x.h.id));
+      ic.forEach((x) => hs.append(new Option(`${[x.h.seq, x.h.name, x.h.model].filter(Boolean).join(' · ')} (${x.why})`, x.h.id)));
+      K.hw.filter((x) => x.projectId === pk.projectId && !top.has(x.id)).forEach((x) => hs.append(new Option([x.seq, x.name, x.model].filter(Boolean).join(' · '), x.id)));
+    }
+    hs.value = pk.hwId || ''; hs.onchange = () => set({ hwId: hs.value });
+    lab('품목', hs);
+    const ks = el('select');
+    [['order', '발주'], ['delivery', '납품'], ['stock', '납품 (재고에서)']].forEach(([v, t]) => ks.append(new Option(t, v)));
+    ks.value = pk.recKind === 'order' ? 'order' : pk.fromStock ? 'stock' : 'delivery';
+    ks.onchange = () => set({ recKind: ks.value === 'order' ? 'order' : 'delivery', fromStock: ks.value === 'stock' });
+    lab('기록', ks);
+    const dt = el('input'); dt.type = 'date'; dt.value = pk.date || ''; dt.onchange = () => set({ date: dt.value });
+    lab('날짜', dt);
+    const q = el('input'); q.type = 'text'; q.inputMode = 'decimal'; q.value = pk.qty !== '' && pk.qty != null ? fmt(pk.qty) : ''; q.placeholder = '수량';
+    q.onchange = () => { const n = toNum(q.value); set({ qty: n == null ? '' : n }); };
+    lab('수량', q);
+    return f;
+  }
+
+  // 신규 프로젝트 건
+  function ktNewCard(card, k, done) {
+    let np = {}; try { np = JSON.parse(k.newProject || '{}'); } catch {}
+    const to = el('dl', 'ktto');
+    [['현장명', np.site || k.site], ['설계사', np.designer], ['설계담당자', np.designManager], ['시공사', np.builder], ['시공담당자', np.clientManager], ['금액', np.amount ? won(np.amount) : '']]
+      .forEach(([a, b]) => { if (b) { const d = el('div'); d.append(el('dt', null, a), el('dd', null, b)); to.append(d); } });
+    card.append(to);
+    if (k.note) card.append(el('p', 'ktnote', k.note));
+    const K = state.kt.data;
+    if (done) {
+      const p = K.projects.find((x) => x.id === k.projectId);
+      card.append(el('p', 'note', k.status === '확인' ? `프로젝트 "${p ? p.site : ''}"(으)로 등록함` : '건너뜀'));
+      if (k.status === '건너뜀') { const a = el('div', 'actions'); a.append(btn('되돌리기', 'sm', (e) => ktDo(e.currentTarget, k, 'reopen'))); card.append(a); }
+      return;
+    }
+    const pc = ktProjects(k);
+    if (pc.length) card.append(el('p', 'ktwarn', `비슷한 프로젝트가 이미 있습니다: ${pc.slice(0, 3).map((x) => x.p.site).join(', ')}`));
+    const acts = el('div', 'actions');
+    acts.append(btn('새 프로젝트로 등록', 'primary sm', () => ktNewProject(k)));
+    if (pc.length) acts.append(btn(`"${pc[0].p.site}"과 같은 현장`, 'sm', (e) => ktDo(e.currentTarget, k, 'confirm', { projectId: pc[0].p.id, remember: true })));
+    acts.append(btn('건너뛰기', 'sm', (e) => ktDo(e.currentTarget, k, 'skip')));
+    card.append(acts);
+  }
+
+  async function ktDo(button, k, act, data) {
+    const j = await run(button, () => api('kakaoDone', { id: k.id, do: act, data: data || {} }));
+    if (!j) return;
+    state.kt.data = j; state.kt.edit.delete(k.id); state.kt.editing.delete(k.id);
+    state.list = null; state.detail = null;
+    renderKakao();
+    toast({ confirm: '기록했습니다.', same: '이미 있던 기록과 같은 건으로 처리했습니다.', skip: '건너뛰었습니다.', reopen: '확인 대기로 되돌렸습니다.' }[act]);
+  }
+
+  // 신규 프로젝트 등록 (카톡 내용으로 미리 채움)
+  function ktNewProject(k) {
+    let np = {}; try { np = JSON.parse(k.newProject || '{}'); } catch {}
+    const m = state.kt.data.msgs[k.msgId] || {};
+    const v0 = { site: np.site || k.site, designer: np.designer || k.designer, designManager: np.designManager, builder: np.builder || k.builder, clientManager: np.clientManager, hansonManager: m.sender, total: np.amount ? fmt(np.amount) : '' };
+    const dlg = $('dlg'), box = el('form', 'dlg'); box.noValidate = true;
+    box.append(el('h2', null, '새 프로젝트로 등록'));
+    const grid = el('div', 'fields'), inp = {};
+    const st = el('select'); state.statuses.forEach((s) => st.append(new Option(s, s))); st.value = state.statuses.includes('영업중') ? '영업중' : state.statuses[0];
+    const sl = el('label', 'field'); sl.append(el('span', null, '현 상황'), st); grid.append(sl);
+    [['site', '현장명'], ['designer', '설계사'], ['builder', '시공사'], ['designManager', '설계담당자'], ['clientManager', '시공담당자'], ['hansonManager', '핸썬담당자'], ['total', '총 금액 (원)']].forEach(([key, t]) => {
+      const lb = el('label', 'field'), i = el('input'); i.type = 'text'; i.value = v0[key] || ''; i.maxLength = 200; i.autocomplete = 'off';
+      if (key === 'total') i.inputMode = 'numeric';
+      lb.append(el('span', null, t), i); grid.append(lb); inp[key] = i;
+    });
+    const err = el('p', 'err'); err.hidden = true; err.style.margin = '0';
+    const acts = el('div', 'actions'), ok = el('button', 'btn primary', '등록'); ok.type = 'submit';
+    acts.append(ok, btn('취소', null, () => dlg.close()));
+    box.append(grid, err, acts);
+    box.onsubmit = async (e) => {
+      e.preventDefault();
+      const v = (x) => inp[x].value.trim();
+      if (!v('site')) { err.textContent = '현장명을 입력해 주세요.'; err.hidden = false; inp.site.focus(); return; }
+      const tn = v('total') ? toNum(v('total')) : 0;
+      if (tn == null) { err.textContent = '총 금액은 숫자로 입력해 주세요.'; err.hidden = false; inp.total.focus(); return; }
+      const project = { status: st.value, total: tn };
+      ['site', 'designer', 'builder', 'designManager', 'clientManager', 'hansonManager'].forEach((x) => { project[x] = v(x); });
+      // 카톡에 적힌 이름과 다르게 등록하면 카톡 이름을 현장 별칭으로 남김
+      if (k.site && siteKey(k.site) !== siteKey(project.site)) project.siteAlias = k.site;
+      const j = await run(ok, () => api('saveProject', { project }));
+      if (!j) return;
+      dlg.close(); state.list = null;
+      if (k.kind === '신규프로젝트') { await ktDo(null, k, 'confirm', { projectId: j.project.id }); return; }
+      state.kt.edit.set(k.id, Object.assign({}, ktPick(k), { projectId: j.project.id, hwId: '' }));
+      state.kt.data = await api('kakaoList'); renderKakao(); toast('새 프로젝트를 등록했습니다. 이제 품목을 골라 주세요.');
+    };
+    dlg.replaceChildren(box); if (!dlg.open) dlg.showModal();
+  }
+
+  // 프로젝트에 없는 품목을 카톡 내용으로 더함
+  function ktNewItem(k, p) {
+    const dlg = $('dlg'), box = el('form', 'dlg'); box.noValidate = true;
+    box.append(el('h2', null, '품목으로 추가'), el('p', 'note', `"${p.site}" 프로젝트에 품목을 더합니다. 현장수량은 현장에 들어가는 수량입니다. 모르면 카톡 수량을 그대로 두고 나중에 고쳐 주세요.`));
+    const grid = el('div', 'fields'), inp = {};
+    [['name', '제품명', k.name], ['model', '모델명', k.model], ['maker', '매입처', k.supplier], ['unit', '단위', k.unit], ['qty', '현장수량', k.qty !== '' ? fmt(k.qty) : '']].forEach(([key, t, v]) => {
+      const lb = el('label', 'field'), i = el('input'); i.type = 'text'; i.value = v || ''; i.maxLength = 200; i.autocomplete = 'off';
+      if (key === 'qty') i.inputMode = 'decimal';
+      lb.append(el('span', null, t), i); grid.append(lb); inp[key] = i;
+    });
+    const err = el('p', 'err'); err.hidden = true; err.style.margin = '0';
+    const acts = el('div', 'actions'), ok = el('button', 'btn primary', '추가'); ok.type = 'submit';
+    acts.append(ok, btn('취소', null, () => dlg.close()));
+    box.append(grid, err, acts);
+    box.onsubmit = async (e) => {
+      e.preventDefault();
+      const v = (x) => inp[x].value.trim();
+      if (!v('name') && !v('model')) { err.textContent = '제품명이나 모델명을 입력해 주세요.'; err.hidden = false; inp.name.focus(); return; }
+      const q = toNum(v('qty'));
+      if (q == null || q < 0) { err.textContent = '현장수량을 0 이상의 숫자로 입력해 주세요.'; err.hidden = false; inp.qty.focus(); return; }
+      const item = { name: v('name'), model: v('model'), maker: v('maker'), unit: v('unit'), qty: q, amount: 0, memo: '카톡에서 추가' };
+      try { await ensureCatalog(); const m = matchErp(item); item.erpCode = m.code; item.erpState = m.state; } catch {}
+      const before = new Set(state.kt.data.hw.map((h) => h.id));
+      const j = await run(ok, () => api('addItem', { projectId: p.id, item }));
+      if (!j) return;
+      dlg.close(); state.detail = j;
+      const added = j.items.find((h) => !before.has(h.id));
+      state.kt.edit.set(k.id, Object.assign({}, ktPick(k), { projectId: p.id, hwId: added ? added.id : '' }));
+      state.kt.data = await api('kakaoList'); renderKakao(); toast('품목을 더했습니다. 내용을 확인하고 [맞음]을 눌러 주세요.');
+    };
+    dlg.replaceChildren(box); if (!dlg.open) dlg.showModal();
+  }
+
+  async function ktUpload(file) {
+    const S = state.kt;
+    let msgs;
+    try { msgs = parseKakao(await file.text()); } catch { toast('파일을 읽지 못했습니다.'); return; }
+    if (!msgs.length) { toast('카톡 대화 내보내기 파일이 아닌 것 같습니다. 날짜 줄과 [이름] [오전 10:05] 형식의 메시지를 찾지 못했습니다.'); return; }
+    S.parsing = true; S.note = `메시지 ${fmt(msgs.length)}개를 올리는 중…`; renderKakao();
+    try {
+      let added = 0, dup = 0;
+      for (let i = 0; i < msgs.length; i += 2000) { const j = await api('kakaoUpload', { messages: msgs.slice(i, i + 2000) }); added += j.added; dup += j.dup; S.data.counts = j.counts; }
+      S.note = `새 메시지 ${fmt(added)}개를 올렸습니다` + (dup ? ` (이미 있던 ${fmt(dup)}개는 건너뜀).` : '.');
+    } catch (e) { S.parsing = false; S.note = ''; toast(e.message); renderKakao(); return; }
+    S.parsing = false;
+    await ktParseAll();
+  }
+
+  // 남은 메시지가 없을 때까지 해석 (두 묶음씩 동시에)
+  async function ktParseAll() {
+    const S = state.kt;
+    if (S.parsing) return;
+    S.parsing = true;
+    const head = S.note && !/해석/.test(S.note) ? S.note + ' ' : '';
+    let left = (S.data.counts['대기'] || 0) + (S.data.counts['해석중'] || 0), stop = null, size = 25;
+    const show = () => { S.note = head + `Claude가 해석하는 중… 남은 메시지 ${fmt(left)}개 (한 묶음에 수십 초 걸립니다. 이 화면을 닫아도 해석한 것은 남습니다)`; if (location.hash === '#/kakao') renderKakao(); };
+    show();
+    const worker = async () => {
+      while (!stop) {
+        let j;
+        try { j = await api('kakaoParse', { size }); }
+        catch (e) { if (e.code === 'network' && size > 10) { size = Math.ceil(size / 2); continue; } stop = e; return; }
+        left = j.left; show();
+        if (!j.parsed || !j.left) return;
+      }
+    };
+    await Promise.all([worker(), new Promise((r) => setTimeout(r, 1500)).then(worker)]);
+    S.parsing = false;
+    S.note = stop ? head.trim() : head + '해석을 마쳤습니다.';
+    if (stop && stop.code !== 'auth') toast(stop.message);
+    try { S.data = await api('kakaoList'); } catch {}
+    if (location.hash === '#/kakao') renderKakao();
+  }
+
   /* ---------- 시작 ---------- */
   function loadScript(src) { return new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = no; document.head.append(s); }); }
   (async () => {
     if (MOCK) {
-      await loadScript('dev/mock-gas.js'); await loadScript('apps-script/Seed.js').catch(() => {}); await loadScript('apps-script/Code.js');
+      await loadScript('dev/mock-gas.js'); await loadScript('apps-script/Seed.js').catch(() => {}); await loadScript('apps-script/Code.js'); await loadScript('apps-script/Kakao.js'); await loadScript('dev/mock-claude.js').catch(() => {});
       window.__mockReady();
     } else if (!CFG.API_URL) {
       app.replaceChildren(el('p', 'banner bad', '아직 서버 주소가 설정되지 않았습니다. 관리자에게 알려 주세요.'));

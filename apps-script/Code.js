@@ -15,16 +15,30 @@ const SHEETS = {
   project: { name: '프로젝트', cols: [
     ['id', 'id'], ['status', '현상황'], ['site', '현장명'], ['designer', '설계사'], ['builder', '시공사'],
     ['clientManager', '시공담당자'], ['hansonManager', '핸썬담당자'], ['dueDate', '준공예정일'], ['total', '총금액', 'num'],
-    ['createdAt', '등록일시'], ['updatedAt', '수정일시'], ['designManager', '설계담당자'], ['deliveryDate', '납품예정일']] },
+    ['createdAt', '등록일시'], ['updatedAt', '수정일시'], ['designManager', '설계담당자'], ['deliveryDate', '납품예정일'], ['siteAlias', '현장별칭']] },
   hw: { name: '하드웨어', cols: [
     ['id', 'id'], ['projectId', '프로젝트id'], ['seq', '순번'], ['name', '제품명'], ['model', '모델명'], ['unit', '단위'],
     ['qty', '수량', 'num'], ['amount', '금액', 'num'], ['createdAt', '등록일시'],
     ['maker', '매입처'], ['erpCode', 'ERP품목코드'], ['erpState', '품목코드상태'],
-    ['memo', '적요'], ['stockManual', '재고수기'], ['stockManualAt', '재고수기일시']] },
+    ['memo', '적요'], ['stockManual', '재고수기'], ['stockManualAt', '재고수기일시'], ['stockConv', '재고전환', 'num']] },
+  // 출처: 카톡에서 확인한 기록이면 '카톡 날짜 시각 보낸 사람'. 재고에서: 핸썬 재고에서 나간 납품이면 Y
   order: { name: '발주', cols: [
-    ['id', 'id'], ['projectId', '프로젝트id'], ['hwId', '하드웨어id'], ['date', '날짜'], ['qty', '수량', 'num'], ['createdAt', '등록일시']] },
+    ['id', 'id'], ['projectId', '프로젝트id'], ['hwId', '하드웨어id'], ['date', '날짜'], ['qty', '수량', 'num'], ['createdAt', '등록일시'],
+    ['source', '출처'], ['fromStock', '재고에서'], ['kakaoId', '카톡확인id']] },
   delivery: { name: '납품', cols: [
-    ['id', 'id'], ['projectId', '프로젝트id'], ['hwId', '하드웨어id'], ['date', '날짜'], ['qty', '수량', 'num'], ['createdAt', '등록일시']] },
+    ['id', 'id'], ['projectId', '프로젝트id'], ['hwId', '하드웨어id'], ['date', '날짜'], ['qty', '수량', 'num'], ['createdAt', '등록일시'],
+    ['source', '출처'], ['fromStock', '재고에서'], ['kakaoId', '카톡확인id']] },
+  // 카톡 대화 내보내기에서 읽은 메시지 (전화번호·계좌번호는 화면에서 지우고 올림). 상태: 대기 / 해석중 / 해석함 / 해석 안 함 / 실패
+  kmsg: { name: '카톡 메시지', cols: [
+    ['id', 'id'], ['key', '중복확인'], ['date', '날짜'], ['time', '시각'], ['sender', '보낸 사람'], ['text', '내용'], ['state', '상태'],
+    ['claimedAt', '해석시작'], ['uploadedAt', '올린 일시']] },
+  // 메시지에서 뽑은 발주·출고·납품·신규 프로젝트 한 건씩. 사람이 [맞음]을 눌러야 발주·납품 시트에 기록됨
+  kitem: { name: '카톡 확인 대기', cols: [
+    ['id', 'id'], ['msgId', '메시지id'], ['kind', '종류'], ['date', '날짜'], ['site', '현장 (카톡)'], ['projectId', '프로젝트id'],
+    ['supplier', '매입처'], ['designer', '설계사'], ['builder', '시공사'], ['name', '제품명 (카톡)'], ['model', '모델명 (카톡)'], ['aka', '다른 이름'],
+    ['qty', '수량'], ['unit', '단위'], ['fromStock', '재고에서'], ['dest', '보낸 곳'], ['purpose', '용도'], ['corrects', '정정 대상'],
+    ['newProject', '신규 프로젝트'], ['note', '메모'], ['status', '상태'], ['hwId', '하드웨어id'], ['recKind', '기록 종류'], ['recId', '기록id'],
+    ['doneAt', '처리 일시'], ['createdAt', '등록일시']] },
   // 품목 별칭 사전: 견적 모델명(별칭) → ERP 품목코드. 프로젝트 관리와 재고 확인이 함께 씀
   alias: { name: '별칭 사전', cols: [
     ['code', '품목코드'], ['erpName', 'ERP 품목명'], ['erpSpec', 'ERP 규격'], ['supplier', '매입처'], ['alias', '별칭 (견적 모델명)'],
@@ -84,6 +98,11 @@ function handle(req) {
     case 'deleteItem': return withLock(() => deleteItem(req.hwId));
     case 'addRecord': return withLock(() => addRecord(req.kind, req.hwId, req.date, req.qty));
     case 'deleteRecord': return withLock(() => deleteRecord(req.kind, req.id));
+    case 'kakaoUpload': return withLock(() => kakaoUpload(req.messages));
+    case 'kakaoParse': return kakaoParse(req.size);
+    case 'kakaoList': return kakaoList();
+    case 'kakaoDone': return withLock(() => kakaoDone(req.id, req.do, req.data || {}));
+    case 'kakaoRetry': return withLock(() => kakaoRetry());
   }
   fail('bad_request', '알 수 없는 요청입니다.');
 }
@@ -265,7 +284,7 @@ function listProjects() {
   const group = (rows) => rows.reduce((m, r) => { (m.get(r.projectId) || m.set(r.projectId, []).get(r.projectId)).push(r); return m; }, new Map());
   const H = group(hw), O = group(orders), D = group(dels);
   projects.forEach((p) => { p.summary = summarize(H.get(p.id) || [], O.get(p.id) || [], D.get(p.id) || []); });
-  return { projects, statuses: statuses() };
+  return { projects, statuses: statuses(), kakaoWaiting: readAll('kitem').filter((k) => k.status === '대기').length };
 }
 
 function getProject(id) {
@@ -289,7 +308,7 @@ function saveProject(p) {
   if (deliveryDate && !isDate(deliveryDate)) fail('invalid', '납품 예정일을 날짜로 입력해 주세요.');
   const total = Number(String(p.total == null ? '' : p.total).replace(/,/g, '')) || 0;
   const rec = { status, site, designer: clip(p.designer), builder: clip(p.builder), designManager: clip(p.designManager), clientManager: clip(p.clientManager),
-    hansonManager: clip(p.hansonManager), deliveryDate, dueDate, total, updatedAt: now() };
+    hansonManager: clip(p.hansonManager), deliveryDate, dueDate, total, siteAlias: clip(p.siteAlias, 500), updatedAt: now() };
   if (p.id) {
     const row = rowIndexOf('project', p.id);
     if (row < 0) fail('not_found', '프로젝트를 찾지 못했습니다. 다른 사람이 지웠을 수 있습니다.');
@@ -324,7 +343,7 @@ function uploadHardware(projectId, items, mode) {
     if (!isFinite(qty) || qty < 0) fail('invalid', `수량이 숫자가 아닌 품목이 있습니다: ${clip(it.name || it.model, 40)}`);
     return { id: newId(), projectId, seq: clip(it.seq, 20), name: clip(it.name), model: clip(it.model), unit: clip(it.unit, 20), qty, amount: Number(it.amount) || 0, createdAt: t,
       maker: clip(it.maker, 60), erpCode: clip(it.erpCode, 40), erpState: ERP_STATES.includes(it.erpState) && it.erpCode ? it.erpState : '',
-      memo: clip(it.memo, 1000), stockManual: '', stockManualAt: '' };
+      memo: clip(it.memo, 1000), stockManual: '', stockManualAt: '', stockConv: Math.max(0, Number(it.stockConv) || 0) };
   });
   if (mode === 'replace') ['order', 'delivery', 'hw'].forEach((k) => deleteWhere(k, (r) => r.projectId === projectId));
   appendRows('hw', rows);
@@ -339,10 +358,10 @@ function updateItem(hwId, patch) {
   const it = readAll('hw').find((h) => h.id === String(hwId));
   Object.keys(ITEM_EDIT).forEach((k) => { if (k in patch) it[k] = clip(patch[k], ITEM_EDIT[k]); });
   if (!it.name && !it.model) fail('invalid', '제품명이나 모델명을 입력해 주세요.');
-  ['qty', 'amount'].forEach((k) => {
+  ['qty', 'amount', 'stockConv'].forEach((k) => {
     if (!(k in patch)) return;
-    const n = Number(String(patch[k] == null ? '' : patch[k]).replace(/,/g, ''));
-    if (!isFinite(n) || n < 0) fail('invalid', k === 'qty' ? '현장수량은 0 이상의 숫자로 입력해 주세요.' : '금액은 숫자로 입력해 주세요.');
+    const raw = String(patch[k] == null ? '' : patch[k]).replace(/,/g, '').trim(), n = raw === '' ? 0 : Number(raw);
+    if (!isFinite(n) || n < 0) fail('invalid', { qty: '현장수량은 0 이상의 숫자로 입력해 주세요.', amount: '금액은 숫자로 입력해 주세요.', stockConv: '재고 전환 수량은 0 이상의 숫자로 입력해 주세요.' }[k]);
     it[k] = n;
   });
   if ('erpCode' in patch || 'erpState' in patch) {
@@ -372,6 +391,10 @@ function deleteItem(hwId) {
 }
 
 function addRecord(kind, hwId, date, qty) {
+  return getProject(addRecordRow(kind, hwId, date, qty, {}).projectId);
+}
+// 기록 한 줄 더하기. extra: { source, fromStock, kakaoId } (카톡에서 확인한 기록)
+function addRecordRow(kind, hwId, date, qty, extra) {
   if (kind !== 'order' && kind !== 'delivery') fail('bad_request', '알 수 없는 기록 종류입니다.');
   const it = readAll('hw').find((h) => h.id === String(hwId || ''));
   if (!it) fail('not_found', '품목을 찾지 못했습니다. 다른 사람이 품목을 바꿨을 수 있습니다.');
@@ -379,8 +402,10 @@ function addRecord(kind, hwId, date, qty) {
   if (!isDate(date)) fail('invalid', '날짜를 입력해 주세요.');
   qty = Number(qty);
   if (!isFinite(qty) || qty <= 0) fail('invalid', '수량은 0보다 큰 숫자로 입력해 주세요.');
-  appendRows(kind, [{ id: newId(), projectId: it.projectId, hwId: it.id, date, qty, createdAt: now() }]);
-  return getProject(it.projectId);
+  const rec = { id: newId(), projectId: it.projectId, hwId: it.id, date, qty, createdAt: now(),
+    source: clip(extra.source, 100), fromStock: extra.fromStock ? 'Y' : '', kakaoId: clip(extra.kakaoId, 40) };
+  appendRows(kind, [rec]);
+  return rec;
 }
 
 function deleteRecord(kind, id) {
@@ -506,6 +531,7 @@ function onOpen() {
     .addSeparator()
     .addItem('재고 확인 암호 등록 (사전 연결·재고 보기용)', 'setDictPasswordPrompt')
     .addItem('별칭 사전·전체 품목 가져오기', 'importSeedMenu')
+    .addItem('카톡 해석용 Claude API 키 등록', 'setClaudeKeyPrompt')
     .addToUi();
 }
 
